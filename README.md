@@ -1,2 +1,2 @@
-# c5_p24_eindopdracht_ws
+# c5_p24_eindopdracht
 eindopdracht standaard niveau
