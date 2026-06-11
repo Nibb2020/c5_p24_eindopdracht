@@ -1,0 +1,321 @@
+<?xml version="1.0"?>
+<robot xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+  <xacro:macro name="assembly" params="parent xyz:='0 0 0' rpy:='0 0 0'">
+
+    <!-- ROOT LINK -->
+    <link name="Bodemplaat_Link">
+
+      <inertial>
+        <origin xyz="-1.11022302462516E-16 2.22044604925031E-16 -0.01"/>
+        <mass value="1.5359030304"/>
+        <inertia
+          ixx="0.04612828767968"
+          ixy="5.86604810778879E-18"
+          ixz="-8.67306980357682E-20"
+          iyy="0.0819660250556801"
+          iyz="-5.78204653571788E-20"
+          izz="0.1279919192"/>
+      </inertial>
+
+      <visual>
+        <geometry>
+          <mesh filename="package://my_uf_description/meshes/Bodemplaat_Link.STL"/>
+        </geometry>
+      </visual>
+
+      <collision>
+        <geometry>
+          <mesh filename="package://my_uf_description/meshes/Bodemplaat_Link.STL"/>
+        </geometry>
+      </collision>
+
+    </link>
+
+    <!-- KOPPELING NAAR HOOFDMODEL -->
+    <joint name="assembly_mount_joint" type="fixed">
+      <parent link="${parent}"/>
+      <child link="Bodemplaat_Link"/>
+      <origin xyz="${xyz}" rpy="${rpy}"/>
+    </joint>
+
+    <!-- HIER PLAK JE DE REST VAN DE LINKS -->
+
+    <link name="Tussenwand_Link">
+        <inertial>
+        <origin
+        xyz="-0.00448174965313353 -0.0202507446576945 0.00333344892596077"
+        rpy="0 0 0" />
+        <mass
+        value="0.576723874475332" />
+        <inertia
+        ixx="0.00464407587355727"
+        ixy="4.78666915384744E-19"
+        ixz="-1.32315186419734E-20"
+        iyy="0.00376656350814385"
+        iyz="3.1464467901023E-06"
+        izz="0.0083750854362578" />
+    </inertial>
+    <visual>
+        <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+        <geometry>
+        <mesh
+            filename="package://my_uf_description/meshes/Tussenwand_Link.STL" />
+        </geometry>
+        <material
+        name="">
+        <color
+            rgba="1 1 0.501960784313725 1" />
+        </material>
+    </visual>
+    <collision>
+        <origin
+        xyz="0 0 0"
+        rpy="0 0 0" />
+        <geometry>
+        <mesh
+            filename="package://my_uf_description/meshes/Tussenwand_Link.STL" />
+        </geometry>
+    </collision>
+    </link>
+
+    <link 
+        name="Magazijn_Link">
+        <inertial>
+            <origin
+            xyz="0.0803020993045752 -1.55431223447522E-15 -0.0094193798515303"
+            rpy="0 0 0" />
+            <mass
+            value="0.564021764410477" />
+            <inertia
+            ixx="0.00331087336844216"
+            ixy="2.8550003235608E-17"
+            ixz="0.000254270799235831"
+            iyy="0.00201958727755338"
+            iyz="-1.25621542725527E-18"
+            izz="0.00359751362258789" />
+        </inertial>
+        <visual>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/Magazijn_Link.STL" />
+            </geometry>
+            <material
+            name="">
+            <color
+                rgba="1 1 1 1" />
+            </material>
+        </visual>
+        <collision>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/Magazijn_Link.STL" />
+            </geometry>
+        </collision>
+    </link>
+
+    <link
+        name="CamStatief_Link">
+        <inertial>
+            <origin
+            xyz="0.530373025165002 -0.0454044359191592 9.00874042031319E-10"
+            rpy="0 0 0" />
+            <mass
+            value="1.10906855254396" />
+            <inertia
+            ixx="0.00770237785068475"
+            ixy="0.010023749997317"
+            ixz="2.84869828218046E-12"
+            iyy="0.0730134351055922"
+            iyz="-3.49753096627032E-09"
+            izz="0.080529905443749" />
+        </inertial>
+        <visual>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/CamStatief_Link.STL" />
+            </geometry>
+            <material
+            name="">
+            <color
+                rgba="0.250980392156863 0.250980392156863 0.250980392156863 1" />
+            </material>
+        </visual>
+        <collision>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/CamStatief_Link.STL" />
+            </geometry>
+        </collision>
+    </link>
+
+    <link
+        name="Camera_Link">
+        <inertial>
+            <origin
+            xyz="-5.6052912554061E-05 8.32516660187466E-06 0.0164999999999997"
+            rpy="0 0 0" />
+            <mass
+            value="0.145110711171842" />
+            <inertia
+            ixx="0.000123572455442236"
+            ixy="-1.99194693456244E-08"
+            ixz="-2.84482210293753E-20"
+            iyy="4.37713567557042E-05"
+            iyz="-3.59602018954423E-20"
+            izz="0.000141967344278472" />
+        </inertial>
+        <visual>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/Camera_Link.STL" />
+            </geometry>
+            <material
+            name="">
+            <color
+                rgba="0 0 1 1" />
+            </material>
+        </visual>
+        <collision>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/Camera_Link.STL" />
+            </geometry>
+        </collision>
+    </link>
+
+    <link
+        name="Blokkade_Link">
+        <inertial>
+            <origin
+            xyz="-1.11022302462516E-16 0.00500000000000012 0"
+            rpy="0 0 0" />
+            <mass
+            value="6.40000000000001" />
+            <inertia
+            ixx="0.341386666666667"
+            ixy="2.99239799605954E-19"
+            ixz="-2.90508358110251E-17"
+            iyy="0.682666666666667"
+            iyz="-2.28694378249612E-19"
+            izz="0.341386666666667" />
+        </inertial>
+        <visual>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/Blokkade_Link.STL" />
+            </geometry>
+            <material
+            name="">
+            <color
+                rgba="1 1 1 1" />
+            </material>
+        </visual>
+        <collision>
+            <origin
+            xyz="0 0 0"
+            rpy="0 0 0" />
+            <geometry>
+            <mesh
+                filename="package://my_uf_description/meshes/Blokkade_Link.STL" />
+            </geometry>
+        </collision>
+ </link>
+
+    <!-- EN ALLE JOINTS -->
+
+     <joint
+        name="Tussenwand_Joint"
+        type="fixed">
+        <origin
+            xyz="0 -0.0900000000000001 0.166588572899761"
+            rpy="1.5707963267949 0 1.5707963267949" />
+        <parent
+            link="Bodemplaat_Link" />
+        <child
+            link="Tussenwand_Link" />
+        <axis
+            xyz="0 0 0" />
+    </joint>
+
+     <joint
+        name="Magazijn_Joint"
+        type="fixed">
+        <origin
+            xyz="-0.26999999999997 -0.0649999999999917 0.0765000000000011"
+            rpy="0 0 0" />
+        <parent
+            link="Bodemplaat_Link" />
+        <child
+            link="Magazijn_Link" />
+        <axis
+            xyz="0 0 0" />
+        </joint>
+
+    <joint
+        name="CamStatief_Joint"
+        type="fixed">
+        <origin
+            xyz="0.355000000000017 -0.0349999999999884 0"
+            rpy="1.57079632679491 -1.5707963267949 3.141592" />
+        <parent
+            link="Bodemplaat_Link" />
+        <child
+            link="CamStatief_Link" />
+        <axis
+            xyz="0 0 0" />
+    </joint>
+
+    <joint
+        name="Camera_Joint"
+        type="fixed">
+        <origin
+            xyz="0.692 -0.197353298054608 -0.00252640936998261"
+            rpy="1.5707963267949 0 1.5707963267949" />
+        <parent
+            link="CamStatief_Link" />
+        <child
+            link="Camera_Link" />
+        <axis
+            xyz="0 0 0" />
+    </joint>
+
+    <joint
+        name="Blokkade_Joint"
+        type="fixed">
+        <origin
+            xyz="0 0.45 0.4"
+            rpy="0 0 0" />
+        <parent
+            link="Bodemplaat_Link" />
+        <child
+            link="Blokkade_Link" />
+        <axis
+            xyz="0 0 0" />
+    </joint>
+  </xacro:macro>
+
+</robot>
