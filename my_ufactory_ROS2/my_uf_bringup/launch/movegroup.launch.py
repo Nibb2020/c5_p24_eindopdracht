@@ -94,6 +94,8 @@ def launch_setup(context, *args, **kwargs):
         .planning_pipelines(config_folder=pipeline_filedir)
         .to_moveit_configs()
     )
+    print("==== ROBOT DESCRIPTION ====")
+    print(moveit_config.robot_description["robot_description"])
 
     moveit_config_dump = yaml.dump(moveit_config.to_dict())
 

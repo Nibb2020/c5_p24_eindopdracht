@@ -7,7 +7,7 @@ moveit_setup_assistant_config:
   package_settings:
     author_name: Joyce Wijnen
     author_email: j.wijnen5@student.avans.nl
-    generated_timestamp: 1781171146
+    generated_timestamp: 1781262276
   control_xacro:
     command:
       - position
