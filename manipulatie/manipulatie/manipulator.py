@@ -12,6 +12,8 @@ import tf_transformations
 from project_interfaces.srv import Manipulator
 from std_msgs.msg import String
 import threading
+from xarm_msgs.srv import VacuumGripperCtrl
+import time
 
 
 class manipulatorController(Node):
@@ -58,6 +60,10 @@ class manipulatorController(Node):
         self.running = False
         self.lock = threading.Lock()
 
+        #gripper opstarten
+        self.vacuum_gripper = VacuumGripper()
+        self.vacuum_gripper.open()
+
         self.get_logger().info("Lite6 manipulator node has been initialized.")
 
     # --- Create callback functions here ---
@@ -99,11 +105,14 @@ class manipulatorController(Node):
     # --- App sequence ----------------------------------------------------
 
     def start_ontvangen(self, request, response):
-        self.get_logger().info("Service ontvangen")
+        self.get_logger().info(f"Service ontvangen, voorwerp is: {request.klasse}")
+        self.klasse = request.klasse
+        self.tranlation = request.translation
+        self.rotation = request.rotation
 
         with self.lock:
             if self.running:
-                response.success = False
+                response.succes = False
                 return response
 
             self.running = True
@@ -115,7 +124,7 @@ class manipulatorController(Node):
         thread = threading.Thread(target=self._run_process, daemon=True)
         thread.start()
 
-        response.success = True
+        response.succes = True
         return response
     
     def _run_process(self):
@@ -145,13 +154,66 @@ class manipulatorController(Node):
         self.get_logger().info(msg)
 
     def execute_app(self):
-        #self.move_to_state("home")
+        self.move_to_state("home")
 
-        #self.move_to_state("right")
+        self.move_to_state("right")
+
+        self.vacuum_gripper.close()
+        
+        if self.klasse == "hooi":
+            self.move_to_state("drop1")
+        elif self.klasse == "kanon":
+            self.move_to_state("drop2")
+        elif self.klasse == "rood":
+            self.move_to_state("drop3")
+        elif self.klasse == "blauw":
+            self.move_to_state("drop4")
+        else:
+            self.get_logger().warn("Sorry, er is geen object van een van de vier klasse gedecteerd")
+            self.move_to_state("home")
+
+
+        self.vacuum_gripper.open()
+
+        self.move_to_state("up")
         True
 
+class VacuumGripper(Node):
+    def __init__(self):
+        super().__init__('vacuum_gripper')
 
+        self.gripper = self.create_client(VacuumGripperCtrl, "manipulator/GripperCtrl" )
+        self.request = VacuumGripperCtrl.Request()
+
+    def close (self):
+        self.get_logger().info('closing gripper')
+
+        self.request.on = False
+
+        self.future = self.gripper.call_async(self.request)
+        self.wait_with_abort(1.0)
+        return self.future
+
+    def open (self):
+        self.get_logger().info('opening gripper')
         
+        self.request.on = True
+
+        self.future = self.gripper.call_async(self.request)
+        self.wait_with_abort(1.0)
+        return self.future
+
+    def wait_with_abort(self, duration):
+        start = time.monotonic()
+
+        while time.monotonic() - start < duration:
+            #if self.emergency_stop:
+                #self.get_logger().warn("Noodstop tijdens wachten!")
+                #return False
+
+            time.sleep(0.01)  # 10 ms chunks
+
+        return True
 
 # --------------------------------------------------------------------------
 # Do not modify the main function unless necessary.
