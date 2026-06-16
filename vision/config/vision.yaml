@@ -1,0 +1,8 @@
+vision_node:
+  ros__parameters:
+    confidence_default: 0.85
+    aruco_marker_id: 0
+    aruco_marker_size_mm: 50.0
+    save_dataset_default: true
+    dataset_folder: "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/dataset"
+    yolo_model_path: "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/yolov8n.rvc2.tar.xz"
