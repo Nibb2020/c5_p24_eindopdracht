@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'manipulation'
+package_name = 'manipulatie'
 
 setup(
     name=package_name,
@@ -24,6 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
+            'manipulator = manipulatie.manipulator:main',
         ],
     },
 )

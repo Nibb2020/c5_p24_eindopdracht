@@ -20,7 +20,7 @@ from uf_ros_lib.uf_robot_utils import generate_ros2_control_params_temp_file
 
 
 def launch_setup(context, *args, **kwargs):
-    robot_ip = LaunchConfiguration('robot_ip', default='192.168.1.155')
+    robot_ip = LaunchConfiguration('robot_ip', default='192.168.1.156')
     dof = LaunchConfiguration('dof', default=6)
     robot_type = LaunchConfiguration('robot_type', default='lite')
     report_type = LaunchConfiguration('report_type', default='normal')
@@ -31,7 +31,7 @@ def launch_setup(context, *args, **kwargs):
     attach_xyz = LaunchConfiguration('attach_xyz', default='"0 0 0"')
     attach_rpy = LaunchConfiguration('attach_rpy', default='"0 0 0"')
    
-    add_gripper = LaunchConfiguration('add_gripper', default=False)
+    add_gripper = LaunchConfiguration('add_gripper', default=True)
     add_vacuum_gripper = LaunchConfiguration('add_vacuum_gripper', default=False)
     add_bio_gripper = LaunchConfiguration('add_bio_gripper', default=False)
     
