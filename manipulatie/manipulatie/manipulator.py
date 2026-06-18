@@ -182,7 +182,7 @@ class VacuumGripper(Node):
     def __init__(self):
         super().__init__('vacuum_gripper')
 
-        self.gripper = self.create_client(VacuumGripperCtrl, "manipulator/GripperCtrl" )
+        self.gripper = self.create_client(VacuumGripperCtrl, "/xarm/set_vacuum_gripper" )
         self.request = VacuumGripperCtrl.Request()
 
     def close (self):
@@ -191,7 +191,7 @@ class VacuumGripper(Node):
         self.request.on = False
 
         self.future = self.gripper.call_async(self.request)
-        self.wait_with_abort(1.0)
+        time.sleep(2.0)
         return self.future
 
     def open (self):
@@ -200,20 +200,8 @@ class VacuumGripper(Node):
         self.request.on = True
 
         self.future = self.gripper.call_async(self.request)
-        self.wait_with_abort(1.0)
+        time.sleep(2.0)
         return self.future
-
-    def wait_with_abort(self, duration):
-        start = time.monotonic()
-
-        while time.monotonic() - start < duration:
-            #if self.emergency_stop:
-                #self.get_logger().warn("Noodstop tijdens wachten!")
-                #return False
-
-            time.sleep(0.01)  # 10 ms chunks
-
-        return True
 
 # --------------------------------------------------------------------------
 # Do not modify the main function unless necessary.

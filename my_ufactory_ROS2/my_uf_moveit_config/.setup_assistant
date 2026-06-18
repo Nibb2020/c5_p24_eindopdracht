@@ -5,21 +5,6 @@ moveit_setup_assistant_config:
   srdf:
     relative_path: config/uf_robot.srdf
   package_settings:
-    author_name: Joyce Wijnen
-    author_email: j.wijnen5@student.avans.nl
-    generated_timestamp: 1781262276
-  control_xacro:
-    command:
-      - position
-    state:
-      - position
-      - velocity
-  modified_urdf:
-    xacros:
-      - control_xacro
-  control_xacro:
-    command:
-      - position
-    state:
-      - position
-      - velocity
+    author_name: Gerard Harkema
+    author_email: GA.Harkema@avans.nl
+    generated_timestamp: 1781770430
