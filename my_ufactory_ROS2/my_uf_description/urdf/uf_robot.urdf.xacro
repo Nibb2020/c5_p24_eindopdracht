@@ -207,12 +207,11 @@
   </joint>
 
   <!-- Gripper Lite6 -->
-<!--
   <link name="gripper_lite6_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="package://my_uf_description/meshes/Gripper_Lite.stl" scale="1 1 1"/>
+        <mesh filename="package://my_uf_description/meshes/Gripper_Lite.STL" scale="1 1 1"/>
       </geometry>
       <material name="gray">
         <color rgba="0.6 0.6 0.6 1.0"/>
@@ -221,7 +220,7 @@
     <collision>
       <origin xyz="0 0 0" rpy="0 0 0"/>
       <geometry>
-        <mesh filename="package://my_uf_description/meshes/Gripper_Lite.stl" scale="1 1 1"/>
+        <mesh filename="package://my_uf_description/meshes/Gripper_Lite.STL" scale="1 1 1"/>
       </geometry>
     </collision>
     <inertial>
@@ -235,7 +234,6 @@
     <child link="gripper_lite6_link"/>
     <origin xyz="-0.105 -0.03875 -0.02" rpy="0 0 0"/>
   </joint>
--->
 
     <gazebo reference="world">
       <turnGravityOff>true</turnGravityOff>
