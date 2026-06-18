@@ -53,6 +53,38 @@
         <joint name="joint5" value="0.2272"/>
         <joint name="joint6" value="0"/>
     </group_state>
+    <group_state name="drop1" group="lite6">
+        <joint name="joint1" value="-0.55"/>
+        <joint name="joint2" value="0.6798"/>
+        <joint name="joint3" value="1.7241"/>
+        <joint name="joint4" value="0.0347"/>
+        <joint name="joint5" value="1.05"/>
+        <joint name="joint6" value="-2.0481"/>
+    </group_state>
+    <group_state name="drop2" group="lite6">
+        <joint name="joint1" value="-0.7984"/>
+        <joint name="joint2" value="0.2748"/>
+        <joint name="joint3" value="1.0803"/>
+        <joint name="joint4" value="0.0347"/>
+        <joint name="joint5" value="0.8011"/>
+        <joint name="joint6" value="-2.4646"/>
+    </group_state>
+    <group_state name="drop3" group="lite6">
+        <joint name="joint1" value="-0.1984"/>
+        <joint name="joint2" value="0.593"/>
+        <joint name="joint3" value="1.2559"/>
+        <joint name="joint4" value="3.0201"/>
+        <joint name="joint5" value="-0.5859"/>
+        <joint name="joint6" value="1.2844"/>
+    </group_state>
+    <group_state name="drop4" group="lite6">
+        <joint name="joint1" value="-0.3124"/>
+        <joint name="joint2" value="0.1012"/>
+        <joint name="joint3" value="0.6999"/>
+        <joint name="joint4" value="3.0895"/>
+        <joint name="joint5" value="-0.6098"/>
+        <joint name="joint6" value="1.2844"/>
+    </group_state>
     <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="baseplate_link"/>
     <virtual_joint name="virtual_joint" type="fixed" parent_frame="world" child_link="link_base"/>
@@ -107,6 +139,10 @@
     <disable_collisions link1="baseplate_link" link2="link2" reason="Never"/>
     <disable_collisions link1="baseplate_link" link2="link_base" reason="Default"/>
     <disable_collisions link1="baseplate_link" link2="mountingplate_link" reason="Adjacent"/>
+    <disable_collisions link1="gripper_lite6_link" link2="link3" reason="Never"/>
+    <disable_collisions link1="gripper_lite6_link" link2="link5" reason="Never"/>
+    <disable_collisions link1="gripper_lite6_link" link2="link6" reason="Adjacent"/>
+    <disable_collisions link1="gripper_lite6_link" link2="uflite_gripper_link" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="link_base" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="mountingplate_link" reason="Never"/>
