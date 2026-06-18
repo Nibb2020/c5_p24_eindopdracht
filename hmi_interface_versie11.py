@@ -268,18 +268,41 @@ class HumanInterface:
             self.toggle_turn_off()
             if 'ui_training_inference' in self.callbacks: self.callbacks['ui_training_inference'](False)
 
+    def _safe_callback(self, key, value):
+        """Voert een callback veilig uit als deze gedefinieerd is."""
+        callback = self.callbacks.get(key)
+        if callback:
+            callback(value)
+
     def update_snelheid(self, event):
-        if not self.ui_start_stop_active and not self.ui_training_inference_active: return
-        if self.slider_snelheid.get() > 0: self.snelheid_laatste = self.slider_snelheid.get()
+        # 1. Validatie (Sliders negeren als alles onactief is)
+        if not (self.ui_start_stop_active or self.ui_training_inference_active): return
+
+        # 2. Status & UI Updates
+        huidige_waarde = self.slider_snelheid.get()
+        if huidige_waarde > 0: self.snelheid_laatste = huidige_waarde
         self.slider_snelheid.config(label=f"Snelheid (Actief: {self.snelheid_laatste})")
-        if 'snelheid' in self.callbacks: self.callbacks['snelheid'](self.slider_snelheid.get())
+        
+        # Print de waarde live naar de HMI Terminal
+        self.update_ui_log(f"[HMI] Snelheid handmatig aangepast naar: {huidige_waarde}")
+        
+        # 3. Veilige externe actie
+        self._safe_callback('snelheid', huidige_waarde)
 
     def update_versnelling(self, event):
+        # 1. Validatie
         if not self.ui_training_inference_active: return 
-        self.versnelling_laatste = self.slider_versnelling.get()
+        
+        # 2. Status & UI Updates
+        huidige_waarde = self.slider_versnelling.get()
+        self.versnelling_laatste = huidige_waarde
         self.slider_versnelling.config(label=f"Versnelling (Actief: {self.versnelling_laatste})")
-        if 'versnelling' in self.callbacks: self.callbacks['versnelling'](self.slider_versnelling.get())
-
+        
+        # Print de waarde live naar de HMI Terminal
+        self.update_ui_log(f"[HMI] Versnelling handmatig aangepast naar: {huidige_waarde}")
+        
+        # 3. Veilige externe actie
+        self._safe_callback('versnelling', huidige_waarde)
 # ===== RUN MODUS =====
 if __name__ == '__main__':
     root = tk.Tk()
