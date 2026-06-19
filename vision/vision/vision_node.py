@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3  # Gebruik Python 3 als interpreter
 
 """
 =========================================================
@@ -39,615 +39,803 @@ Author:
 # Imports
 # =========================================================
 
-# ROS2
-import rclpy
-from rclpy.node import Node
+import rclpy  # ROS2 Python client library
+from rclpy.node import Node  # Basisclass voor een ROS2 node
 
-# Messages
-from sensor_msgs.msg import Image
-from std_msgs.msg import Header
+from sensor_msgs.msg import Image  # ROS2 Image message voor camerabeelden
 
-# CvBridge
-from cv_bridge import CvBridge
+from cv_bridge import CvBridge  # Conversie tussen OpenCV images en ROS Image messages
 
-# OpenCV
-import cv2
-import cv2.aruco as aruco
+import cv2  # OpenCV voor beeldverwerking
+import numpy as np  # NumPy voor matrix- en arraybewerkingen
 
-# System config
-from config.config import *
+from config.config import *  # Importeer alle projectinstellingen uit config.py
 
-# DepthAI
-import depthai as dai
+import depthai as dai  # DepthAI API voor OAK-D pipeline en device
 
-# Utilities
-import uuid
-import time
-import math
-import os
-import json
-import threading
-from pathlib import Path
+import uuid  # Voor unieke object- en dataset-ID's
+import time  # Voor timing, watchdog en timeouts
+import math  # Voor yaw- en quaternionberekeningen
+import json  # Voor dataset metadata-opslag
+import threading  # Voor reconnect- en watchdogthreads
+from pathlib import Path  # Voor veilige bestandspaden
 
-# Custom Interfaces
-from project_interfaces.srv import GetObjectData
-from project_interfaces.srv import ObjectData
-from project_interfaces.msg import ObjectDataArray
-
-# =========================================================
-# FUTURE PIPELINE
-# =========================================================
-
-# ArUco
-# ↓
-# Stereo Depth
-# ↓
-# Sync
-# ↓
-# YOLOv8n
-# ↓
-# ROI Extraction
-# ↓
-# Depth Filter
-# ↓
-# PCA Yaw
-# ↓
-# World Transform
-# ↓
-# UI Publish
-# ↓
-# Service Response
+from project_interfaces.srv import GetObjectData  # Service-interface voor objectaanvragen
+from project_interfaces.msg import ObjectData  # Message voor één gedetecteerd object
+from project_interfaces.msg import ObjectDataArray  # Message voor meerdere gedetecteerde objecten
 
 # =========================================================
 # Vision Node
 # =========================================================
 
-class VisionNode(Node):
+class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-afhandeling
+
+    # =====================================================
+    # Constructor
+    # =====================================================
 
     def __init__(self):
+        super().__init__("vision_node")  # Initialiseer ROS2 node met naam vision_node
 
-        super().__init__("vision_node")
-
-        # =================================================
         # ROS
-        # =================================================
+        self.bridge = CvBridge()  # Maak CvBridge aan voor OpenCV <-> ROS Image conversie
+        self.object_ui_pub = self.create_publisher(ObjectDataArray, UI_TOPIC, 10)  # Publisher voor alle objecten richting UI
+        self.object_L6_pub = self.create_publisher(ObjectData, LITE6_RESULT_TOPIC, 10)  # Publisher voor beste object richting Lite6/debug
+        self.marked_image_pub = self.create_publisher(Image, MARKED_IMAGE_TOPIC, 10)  # Publisher voor gemarkeerd camerabeeld
+        self.object_service = self.create_service(GetObjectData, SERVICE_NAME, self.object_request_callback)  # Service voor objectdata-aanvragen
 
-        self.bridge = CvBridge()
-
-        self.object_ui_pub = self.create_publisher(ObjectDataArray, UI_TOPIC, 10)
-        self.object_L6_pub = self.create_publisher(ObjectData, "/object_data_result", 10)
-        self.marked_image_pub = self.create_publisher(Image, MARKED_IMAGE_TOPIC, 10)
-        self.object_service = self.create_service(GetObjectData, SERVICE_NAME, self.object_request_callback)
-
-        # =================================================
         # Runtime Variables
-        # =================================================
+        self.device = None  # Huidige DepthAI-device instantie
+        self.pipeline = None  # Huidige DepthAI-pipeline instantie
+        self.rgb_queue = None  # Queue voor live RGB-previewframes
+        self.depth_queue = None  # Queue voor depthframes
+        self.detection_queue = None  # Queue voor YOLO-detecties
+        self.nn_frame_queue = None  # Queue voor het frame dat daadwerkelijk door YOLO is verwerkt
+        self.camera_control_queue = None  # Queue voor camera control zoals AWB
+        self.running = False  # Houdt bij of de camera actief is
+        self.latest_frame = None  # Laatst ontvangen liveframe
+        self.confidence_threshold = YOLO_DEFAULT_CONFIDENCE  # Huidige confidencegrens
+        self.use_hardware_awb = True  # Bepaalt of hardware auto white balance aan staat
+        self.last_rgb_frame_time = time.monotonic()  # Tijdstip van het laatst ontvangen frame
+        self.watchdog_running = False  # Houdt bij of de watchdog actief is
+        self.reconnect_lock = threading.Lock()  # Lock om dubbele reconnects te voorkomen
+        self.processing_lock = threading.Lock()  # Lock om gelijktijdige queueverwerking te voorkomen
 
-        self.device = None
-        self.pipeline = None
-        self.rgb_queue = None
-        self.depth_queue = None
-        self.detection_queue = None
-        self.running = False
-        self.latest_frame = None
-        self.confidence_threshold = 0.85
-        self.publish_requested = False
-        self.use_hardware_awb = True
+        # Dataset
+        self.base_path = Path(DATASET_FOLDER)  # Basispad voor datasetopslag
 
-        # =================================================
-        # Initialize
-        # =================================================
+        # ArUco
+        self.camera_position = None  # Gereserveerd voor camerapositie, momenteel niet actief gebruikt
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARY)  # Laad de ingestelde ArUco dictionary
+        self.aruco_params = cv2.aruco.DetectorParameters()  # Maak ArUco detectieparameters aan
+        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)  # Maak ArUco detector aan
+        self.camera_matrix = np.array(CAMERA_MATRIX, dtype=np.float32)  # Zet fallback cameramatrix om naar NumPy
+        self.dist_coeffs = np.array(DIST_COEFFS, dtype=np.float32)  # Zet fallback distortioncoëfficiënten om naar NumPy
+        self.rvec = None  # Laatst berekende marker-naar-camera rotatievector
+        self.tvec = None  # Laatst berekende marker-naar-camera translatievector
+        self.world_calibrated = False  # Houdt bij of world calibration geldig is
+        self.aruco_marker_id = ARUCO_MARKER_ID  # ID van de vaste referentiemarker
+        self.aruco_size_m = ARUCO_SIZE_M  # Fysieke markermaat in meters
 
-        self.initialize_camera()
-        self.set_awb_mode(self.use_hardware_awb)
-        self.timer = self.create_timer(0.03, self.main_loop)
+        # Initialize Camera
+        self.initialize_camera()  # Maak verbinding met de OAK-D
+        self.set_awb_mode(self.use_hardware_awb)  # Stel auto white balance in
+        self.timer = self.create_timer(0.03, self.main_loop)  # Start timer voor live preview / watchdog update
 
     # =====================================================
     # Device Information
     # =====================================================
 
     def print_device_information(self):
-
         try:
-            self.get_logger().info("========== DEVICE INFO ==========")
-            self.get_logger().info(f"MXID: {self.device.getMxId()}")
-            self.get_logger().info(f"USB Speed: {self.device.getUsbSpeed()}")
-            self.get_logger().info(f"Connected Cameras:")
-            
-            cameras = (self.device.getConnectedCameraFeatures())
-            for cam in cameras:
-                self.get_logger().info(str(cam))
-            self.get_logger().info("=================================")
-
+            self.get_logger().info("========== DEVICE INFO ==========")  # Print header voor device-info
+            self.get_logger().info(f"MXID: {self.device.getMxId()}")  # Print unieke OAK-D identifier
+            self.get_logger().info(f"USB Speed: {self.device.getUsbSpeed()}")  # Print actuele USB-snelheid
+            self.get_logger().info(f"Connected Cameras:")  # Print tekstregel voor camera-overzicht
+            cameras = self.device.getConnectedCameraFeatures()  # Lees aangesloten camera's uit
+            for cam in cameras:  # Loop door alle camera features
+                self.get_logger().info(str(cam))  # Print camera feature informatie
+            self.get_logger().info("=================================")  # Print footer voor device-info
         except Exception as ex:
-            self.get_logger().error(str(ex))
-    
+            self.get_logger().error(str(ex))  # Log fout bij ophalen van device-info
+
+    # =====================================================
+    # Device Calibration
+    # =====================================================
+
+    def load_device_calibration(self):
+        try:
+            calib_data = self.device.readCalibration()  # Lees EEPROM-calibratie uit de OAK-D
+            intrinsics = calib_data.getCameraIntrinsics(dai.CameraBoardSocket.CAM_A, RGB_WIDTH, RGB_HEIGHT)  # Lees intrinsics voor RGB-outputformaat
+            distortion = calib_data.getDistortionCoefficients(dai.CameraBoardSocket.CAM_A)  # Lees distortioncoëfficiënten van RGB-camera
+            self.camera_matrix = np.array(intrinsics, dtype=np.float32)  # Zet intrinsics om naar NumPy matrix
+            self.dist_coeffs = np.array(distortion, dtype=np.float32).reshape(-1, 1)  # Zet distortion om naar OpenCV-vorm
+            self.get_logger().info("Loaded OAK-D EEPROM camera calibration")  # Log dat EEPROM-calibratie geladen is
+            self.get_logger().info(f"Camera matrix: {self.camera_matrix}")  # Log cameramatrix
+            self.get_logger().info(f"Dist coeffs: {self.dist_coeffs.flatten()}")  # Log distortioncoëfficiënten
+            return True  # Meld succesvolle calibratielaadactie
+        except Exception as ex:
+            self.get_logger().warn(f"Failed to load device calibration: {ex}")  # Log fallback naar configwaarden
+            self.camera_matrix = np.array(CAMERA_MATRIX, dtype=np.float32)  # Gebruik fallback cameramatrix
+            self.dist_coeffs = np.array(DIST_COEFFS, dtype=np.float32).reshape(-1, 1)  # Gebruik fallback distortion
+            return False  # Meld mislukte calibratielaadactie
+
     # =====================================================
     # Auto White Balance
     # =====================================================
 
     def set_awb_mode(self, use_hardware_awb: bool):
-
-        if self.camera_control_queue is None:
-            return
-
+        if self.camera_control_queue is None:  # Controleer of controlqueue beschikbaar is
+            return  # Stop wanneer camera nog niet klaar is
         try:
-            ctrl = dai.CameraControl()
-
-            if use_hardware_awb:
-                ctrl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.AUTO)
-                self.get_logger().info("Hardware AWB enabled")
-
+            ctrl = dai.CameraControl()  # Maak nieuw DepthAI camera control object
+            if use_hardware_awb:  # Controleer of hardware-AWB aan moet
+                ctrl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.AUTO)  # Zet AWB op AUTO
+                self.get_logger().info("Hardware AWB enabled")  # Log dat AWB aan staat
             else:
-                ctrl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.OFF)
-                self.get_logger().info("Hardware AWB disabled")
-            self.camera_control_queue.send(ctrl)
-
+                ctrl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.OFF)  # Zet AWB uit
+                self.get_logger().info("Hardware AWB disabled")  # Log dat AWB uit staat
+            self.camera_control_queue.send(ctrl)  # Verstuur controlcommand naar de camera
         except Exception as ex:
-            self.get_logger().warn(f"Failed to set AWB mode: {ex}")
+            self.get_logger().warn(f"Failed to set AWB mode: {ex}")  # Log fout bij AWB-instelling
 
     # =====================================================
     # Pipeline
     # =====================================================
 
     def create_pipeline(self):
-        self.get_logger().info("Creating DepthAI pipeline...")
-        pipeline = dai.Pipeline()
+        self.get_logger().info("Creating DepthAI pipeline...")  # Log pipeline-opbouw
+        pipeline = dai.Pipeline()  # Maak nieuwe DepthAI pipeline
 
-        # ============================================================
-        # RGB CAMERA (MAIN STREAM FOR YOLO)
-        # ============================================================
-        cam_rgb = pipeline.createColorCamera()
-        cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)
-        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)
-        cam_rgb.setInterleaved(False)
-        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+        # RGB Camera
+        cam_rgb = pipeline.createColorCamera()  # Maak RGB-camera node aan
+        cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)  # Gebruik CAM_A als RGB-camera
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)  # Zet sensorresolutie op 4K
+        cam_rgb.setInterleaved(False)  # Gebruik planar output voor NN
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)  # Gebruik BGR voor OpenCV
+        cam_rgb.setPreviewSize(RGB_WIDTH, RGB_HEIGHT)  # Zet previewformaat voor YOLO-input
+        cam_rgb.setPreviewKeepAspectRatio(True)  # Behoud aspectratio bij previewcrop
 
-        # YOLO input size
-        cam_rgb.setPreviewSize(1280, 1280)
-        cam_rgb.setPreviewKeepAspectRatio(True)
+        # Camera Control Input
+        control_in = pipeline.createXLinkIn()  # Maak host-to-device inputstream aan
+        control_in.setStreamName("camera_control")  # Geef controlstream een naam
+        control_in.out.link(cam_rgb.inputControl)  # Koppel controlstream aan RGB-camera
 
-        # ============================================================
-        # CAMERA CONTROL INPUT
-        # ============================================================
+        # Stereo Depth
+        left = pipeline.createMonoCamera()  # Maak linker monocamera aan
+        right = pipeline.createMonoCamera()  # Maak rechter monocamera aan
+        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)  # Gebruik CAM_B als linker camera
+        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)  # Gebruik CAM_C als rechter camera
+        left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)  # Zet linker mono op 800p
+        right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)  # Zet rechter mono op 800p
+        stereo = pipeline.createStereoDepth()  # Maak StereoDepth node aan
+        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)  # Gebruik nauwkeurig depthprofiel
+        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)  # Lijn depth uit op RGB-camera
+        stereo.setOutputSize(RGB_WIDTH, RGB_HEIGHT)  # Zet aligned depthformaat gelijk aan RGB-preview
+        left.out.link(stereo.left)  # Koppel linker mono-output aan stereo left input
+        right.out.link(stereo.right)  # Koppel rechter mono-output aan stereo right input
 
-        control_in = pipeline.createXLinkIn()
-        control_in.setStreamName("camera_control")
-        control_in.out.link(cam_rgb.inputControl)
+        # 2D YOLO Network
+        detection_nn = pipeline.create(dai.node.YoloDetectionNetwork)  # Maak 2D YOLO detection node aan
+        detection_nn.setConfidenceThreshold(0.01)  # Zet lage device-confidence; host filtert later
+        detection_nn.setNumClasses(YOLO_NUM_CLASSES)  # Zet aantal YOLO-klassen
+        detection_nn.setCoordinateSize(4)  # Gebruik 4 bboxcoördinaten
+        detection_nn.setAnchors([])  # Gebruik lege anchors voor anchor-free YOLOv8-export
+        detection_nn.setAnchorMasks({})  # Gebruik lege anchor masks voor anchor-free YOLOv8-export
+        detection_nn.setIouThreshold(YOLO_IOU_THRESHOLD)  # Zet IOU threshold
+        detection_nn.setBlobPath(MODEL_PATH)  # Laad YOLO-modelpad
+        cam_rgb.preview.link(detection_nn.input)  # Koppel RGB-preview aan YOLO-input
 
-        # ============================================================
-        # STEREO DEPTH SETUP
-        # ============================================================
-        left = pipeline.createMonoCamera()
-        right = pipeline.createMonoCamera()
-
-        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)
-        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)
-
-        left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
-        right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)
-
-        stereo = pipeline.createStereoDepth()
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)
-
-        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)
-
-        left.out.link(stereo.left)
-        right.out.link(stereo.right)
-
-        # ============================================================
-        # YOLOV8 SPATIAL NETWORK (PLACEHOLDER FOR RVC2 MODEL)
-        # ============================================================
-        detection_nn = pipeline.create(dai.node.YoloDetectionNetwork)
-
-        detection_nn.setConfidenceThreshold(0.01)  # overwritten via ROS later
-        detection_nn.setNumClasses(5)
-        detection_nn.setCoordinateSize(4)
-        detection_nn.setAnchors([])
-        detection_nn.setAnchorMasks({})
-        detection_nn.setIouThreshold(0.5)
-
-        detection_nn.setBlobPath("/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/yolov8n.rvc2.tar.xz")
-
-        cam_rgb.preview.link(detection_nn.input)
-
-        stereo.depth.link(detection_nn.inputDepth)
-
-        # ============================================================
-        # OUTPUT STREAMS
-        # ============================================================
-        xout_rgb = pipeline.createXLinkOut()
-        xout_rgb.setStreamName("rgb")
-        cam_rgb.preview.link(xout_rgb.input)
-
-        xout_depth = pipeline.createXLinkOut()
-        xout_depth.setStreamName("depth")
-        stereo.depth.link(xout_depth.input)
-
-        xout_det = pipeline.createXLinkOut()
-        xout_det.setStreamName("detections")
-        detection_nn.out.link(xout_det.input)
-
-        # ============================================================
-        # DEBUG / SYNC READY (for dataset logging)
-        # ============================================================
-        xout_synced = pipeline.createXLinkOut()
-        xout_synced.setStreamName("synced")
-        detection_nn.passthrough.link(xout_synced.input)
-
-        return pipeline
+        # Output Streams
+        xout_rgb = pipeline.createXLinkOut()  # Maak RGB outputstream
+        xout_rgb.setStreamName("rgb")  # Geef RGB streamnaam
+        cam_rgb.preview.link(xout_rgb.input)  # Koppel RGB-preview naar host
+        xout_depth = pipeline.createXLinkOut()  # Maak depth outputstream
+        xout_depth.setStreamName("depth")  # Geef depth streamnaam
+        stereo.depth.link(xout_depth.input)  # Koppel aligned depth naar host
+        xout_det = pipeline.createXLinkOut()  # Maak detection outputstream
+        xout_det.setStreamName("detections")  # Geef detection streamnaam
+        detection_nn.out.link(xout_det.input)  # Koppel YOLO-output naar host
+        xout_nn_frame = pipeline.createXLinkOut()  # Maak NN-passthrough outputstream
+        xout_nn_frame.setStreamName("nn_frame")  # Geef passthrough streamnaam
+        detection_nn.passthrough.link(xout_nn_frame.input)  # Koppel exact NN-inputframe naar host
+        return pipeline  # Geef opgebouwde pipeline terug
 
     # =====================================================
-    # INITIALIZE CAMERA
+    # Initialize Camera
     # =====================================================
 
     def initialize_camera(self):
+        while rclpy.ok():  # Blijf proberen zolang ROS actief is
+            for attempt in range(RECONNECT_ATTEMPTS):  # Probeer per batch een vast aantal pogingen
+                try:
+                    self.get_logger().info(f"Connecting OAK-D ({attempt + 1}/{RECONNECT_ATTEMPTS})")  # Log verbindingspoging
+                    self.pipeline = self.create_pipeline()  # Bouw nieuwe pipeline
+                    self.device = dai.Device(self.pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH)  # Open device met maximaal USB HIGH
+                    self.print_device_information()  # Print deviceinformatie
+                    if USE_DEVICE_CALIBRATION:  # Controleer of EEPROM-calibratie gebruikt moet worden
+                        self.load_device_calibration()  # Laad devicecalibratie
 
-        success = False
-        self.stale_counter = 0
+                    self.rgb_queue = self.device.getOutputQueue("rgb", maxSize=4, blocking=False)  # Maak RGB queue
+                    self.depth_queue = self.device.getOutputQueue("depth", maxSize=4, blocking=False)  # Maak depth queue
+                    self.detection_queue = self.device.getOutputQueue("detections", maxSize=4, blocking=False)  # Maak detectiequeue
+                    self.nn_frame_queue = self.device.getOutputQueue("nn_frame", maxSize=4, blocking=False)  # Maak NN-frame queue
+                    self.camera_control_queue = self.device.getInputQueue("camera_control")  # Maak camera control queue
+                    self.running = True  # Zet node op actief
+                    self.last_rgb_frame_time = time.monotonic()  # Reset watchdogtimer
+                    self.get_logger().info("Camera connected")  # Log succesvolle verbinding
+                    self.watchdog_running = True  # Zet watchdog actief
 
-        for attempt in range(RECONNECT_ATTEMPTS):
-            try:
-                self.get_logger().info(f"Connecting OAK-D ({attempt+1}/{RECONNECT_ATTEMPTS})")
-
-                # -----------------------------
-                # Build pipeline
-                # -----------------------------
-                self.pipeline = self.create_pipeline()
-
-                # -----------------------------
-                # Create device with pipeline
-                # -----------------------------
-                self.device = dai.Device(self.pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH)
-
-                # -----------------------------
-                # Device info
-                # -----------------------------
-                self.print_device_information()
-
-                # -----------------------------
-                # Output queues
-                # -----------------------------
-                self.rgb_queue = self.device.getOutputQueue("rgb", maxSize=4, blocking=False)
-                self.depth_queue = self.device.getOutputQueue("depth", maxSize=4, blocking=False)
-                self.detection_queue = self.device.getOutputQueue("detections", maxSize=4, blocking=False)
-                self.camera_control_queue = self.device.getInputQueue("camera_control")
-
-                self.running = True
-                success = True
-
-                self.get_logger().info("Camera connected")
-
-                # -----------------------------
-                # Start watchdog once connected
-                # -----------------------------
-                self.watchdog_running = True
-
-                if not hasattr(self, "watchdog_thread") or not self.watchdog_thread.is_alive():
-                    self.watchdog_running = True
-                    self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
-                    self.watchdog_thread.start()
-
-            except Exception as ex:
-                self.get_logger().warn(f"Connection failed: {ex}")
-                time.sleep(RECONNECT_INTERVAL)
-
-        if not success:
-            raise RuntimeError("Unable to connect OAK-D")
-
+                    if not hasattr(self, "watchdog_thread") or not self.watchdog_thread.is_alive():  # Start alleen als watchdog nog niet loopt
+                        self.watchdog_thread = threading.Thread(target=self.watchdog_loop, daemon=True)  # Maak watchdogthread
+                        self.watchdog_thread.start()  # Start watchdogthread
+                    return  # Stop initialize na succesvolle verbinding
+                except Exception as ex:
+                    self.get_logger().warn(f"Connection failed: {ex}")  # Log mislukte verbinding
+                    try:
+                        if self.device is not None:  # Controleer of half-open device bestaat
+                            self.device.close()  # Sluit half-open device
+                    except Exception:
+                        pass  # Negeer fouten bij sluiten
+                    self.device = None  # Wis ongeldig device
+                    time.sleep(RECONNECT_INTERVAL)  # Wacht voor volgende poging
+            self.get_logger().error(f"Unable to connect after {RECONNECT_ATTEMPTS} attempts; continuing retries")  # Log mislukte batch
+            time.sleep(RECONNECT_INTERVAL)  # Wacht voor nieuwe batch
 
     # =====================================================
-    # RECONNECT CAMERA
+    # ArUco
+    # =====================================================
+
+    def estimate_aruco_pose(self, frame):
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Zet BGR-frame om naar grayscale
+        corners, ids, _ = self.aruco_detector.detectMarkers(gray)  # Detecteer ArUco markers
+
+        if ids is None:  # Controleer of markers gevonden zijn
+            return frame, False  # Stop zonder geldige world calibration
+
+        target_marker_found = False  # Houd bij of de juiste referentiemarker gevonden is
+        for i, marker_id in enumerate(ids.flatten()):  # Loop door gevonden marker IDs
+            if marker_id != self.aruco_marker_id:  # Controleer of dit de juiste marker is
+                continue  # Sla andere markers over
+
+            target_marker_found = True  # Markeer dat referentiemarker gevonden is
+            marker_corners = corners[i].reshape((4, 2)).astype(np.float32)  # Zet markerhoeken naar solvePnP-formaat
+            half_size = self.aruco_size_m / 2.0  # Bereken halve markermaat
+            object_points = np.array([[-half_size, half_size, 0.0], [half_size, half_size, 0.0], [half_size, -half_size, 0.0], [-half_size, -half_size, 0.0]], dtype=np.float32)  # Markerhoeken in markerframe
+
+            success, rvec, tvec = cv2.solvePnP(object_points, marker_corners, self.camera_matrix, self.dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)  # Bereken markerpose
+            if not success:  # Controleer of poseberekening gelukt is
+                self.world_calibrated = False  # Markeer world calibration ongeldig
+                return frame, False  # Stop zonder geldige pose
+
+            self.rvec = rvec  # Bewaar marker-naar-camera rotatie
+            self.tvec = tvec  # Bewaar marker-naar-camera translatie
+            self.world_calibrated = True  # Markeer world calibration geldig
+            cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, self.rvec, self.tvec, self.aruco_size_m)  # Teken markerassen ter controle
+            break  # Stop na eerste geldige referentiemarker
+
+        if not target_marker_found:  # Controleer of de juiste marker ontbrak
+            self.world_calibrated = False  # Markeer calibration ongeldig
+            return frame, False  # Stop zonder geldige world calibration
+
+        return frame, self.world_calibrated  # Geef geannoteerd frame en status terug
+
+    # =====================================================
+    # ROI Depth To Camera XYZ
+    # =====================================================
+
+    def estimate_xyz_from_roi(self, depth_frame, bbox):
+        x_min, y_min, x_max, y_max = bbox  # Lees bbox uit
+        depth_height, depth_width = depth_frame.shape[:2]  # Lees depthformaat uit
+        x_min = max(0, min(x_min, depth_width - 1))  # Clamp links
+        x_max = max(0, min(x_max, depth_width - 1))  # Clamp rechts
+        y_min = max(0, min(y_min, depth_height - 1))  # Clamp boven
+        y_max = max(0, min(y_max, depth_height - 1))  # Clamp onder
+
+        if x_max <= x_min or y_max <= y_min:  # Controleer geldige ROI
+            return None  # Stop bij ongeldige ROI
+
+        center_x = int((x_min + x_max) / 2)  # Bepaal ROI-midden X
+        center_y = int((y_min + y_max) / 2)  # Bepaal ROI-midden Y
+        roi_width = x_max - x_min  # Bereken ROI-breedte
+        roi_height = y_max - y_min  # Bereken ROI-hoogte
+        shrunk_width = int(roi_width * ROI_SHRINK_FACTOR)  # Verklein ROI-breedte
+        shrunk_height = int(roi_height * ROI_SHRINK_FACTOR)  # Verklein ROI-hoogte
+        roi_x_min = max(0, center_x - shrunk_width // 2)  # Nieuwe ROI-links
+        roi_x_max = min(depth_width, center_x + shrunk_width // 2)  # Nieuwe ROI-rechts
+        roi_y_min = max(0, center_y - shrunk_height // 2)  # Nieuwe ROI-boven
+        roi_y_max = min(depth_height, center_y + shrunk_height // 2)  # Nieuwe ROI-onder
+        roi_depth = depth_frame[roi_y_min:roi_y_max, roi_x_min:roi_x_max]  # Pak depth-ROI
+        valid_depth = roi_depth[(roi_depth > MIN_DEPTH_MM) & (roi_depth < MAX_DEPTH_MM)]  # Filter ongeldige depthwaarden
+
+        if valid_depth.size < MIN_VALID_DEPTH_PIXELS:  # Controleer genoeg geldige depthpixels
+            return None  # Stop bij te weinig depth
+
+        z_mm = float(np.median(valid_depth))  # Bepaal mediaan depth in millimeters
+        z_m = z_mm / 1000.0  # Zet depth om naar meters
+        fx = float(self.camera_matrix[0, 0])  # Lees fx uit cameramatrix
+        fy = float(self.camera_matrix[1, 1])  # Lees fy uit cameramatrix
+        cx_camera = float(self.camera_matrix[0, 2])  # Lees cx uit cameramatrix
+        cy_camera = float(self.camera_matrix[1, 2])  # Lees cy uit cameramatrix
+        x_m = ((center_x - cx_camera) * z_m / fx)  # Bereken camera-X
+        y_m = ((center_y - cy_camera) * z_m / fy)  # Bereken camera-Y
+        return (x_m, y_m, z_m, z_mm, center_x, center_y)  # Geef XYZ, depth en ROI-midden terug
+
+    # =====================================================
+    # PCA Yaw From Depth ROI
+    # =====================================================
+
+    def estimate_yaw_from_depth_roi(self, depth_frame, bbox, z_mm):
+        x_min, y_min, x_max, y_max = bbox  # Lees bbox uit
+        depth_height, depth_width = depth_frame.shape[:2]  # Lees depthformaat uit
+        x_min = max(0, min(x_min, depth_width - 1))  # Clamp links
+        x_max = max(0, min(x_max, depth_width - 1))  # Clamp rechts
+        y_min = max(0, min(y_min, depth_height - 1))  # Clamp boven
+        y_max = max(0, min(y_max, depth_height - 1))  # Clamp onder
+
+        if x_max <= x_min or y_max <= y_min:  # Controleer geldige ROI
+            return 0.0  # Geef neutrale yaw terug
+
+        roi_depth = depth_frame[y_min:y_max, x_min:x_max]  # Pak depth binnen bbox
+        mask = ((roi_depth > z_mm - DEPTH_BAND_MM) & (roi_depth < z_mm + DEPTH_BAND_MM))  # Maak dieptemasker rond objectdiepte
+        ys, xs = np.where(mask)  # Zoek geldige pixels in masker
+
+        if xs.size < 20:  # Controleer genoeg punten voor PCA
+            return 0.0  # Geef neutrale yaw terug
+
+        points = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))  # Bouw 2D-puntenwolk
+        mean = np.mean(points, axis=0)  # Bereken gemiddelde punt
+        centered_points = points - mean  # Centreer puntenwolk
+        covariance = np.cov(centered_points, rowvar=False)  # Bereken covariantiematrix
+        eigenvalues, eigenvectors = np.linalg.eig(covariance)  # Bereken eigenwaarden en eigenvectoren
+        principal_axis = eigenvectors[:, np.argmax(eigenvalues)]  # Kies hoofdas met grootste variantie
+        yaw = math.atan2(float(principal_axis[1]), float(principal_axis[0]))  # Bereken beeldvlak-yaw
+        return yaw  # Geef yaw in radialen terug
+
+    # =====================================================
+    # Image Yaw To World Yaw
+    # =====================================================
+
+    def image_yaw_to_world_yaw(self, center_x, center_y, z_m, image_yaw):
+        fx = float(self.camera_matrix[0, 0])  # Lees fx
+        fy = float(self.camera_matrix[1, 1])  # Lees fy
+        cx_camera = float(self.camera_matrix[0, 2])  # Lees cx
+        cy_camera = float(self.camera_matrix[1, 2])  # Lees cy
+        step_px = 30.0  # Pixelstap om richting te projecteren
+        x2_px = center_x + step_px * math.cos(image_yaw)  # Bereken tweede beeldpunt X
+        y2_px = center_y + step_px * math.sin(image_yaw)  # Bereken tweede beeldpunt Y
+        p1_x = ((center_x - cx_camera) * z_m / fx)  # Bereken punt 1 camera-X
+        p1_y = ((center_y - cy_camera) * z_m / fy)  # Bereken punt 1 camera-Y
+        p2_x = ((x2_px - cx_camera) * z_m / fx)  # Bereken punt 2 camera-X
+        p2_y = ((y2_px - cy_camera) * z_m / fy)  # Bereken punt 2 camera-Y
+        w1_x, w1_y, _ = self.transform_to_world(p1_x, p1_y, z_m)  # Transformeer punt 1 naar world
+        w2_x, w2_y, _ = self.transform_to_world(p2_x, p2_y, z_m)  # Transformeer punt 2 naar world
+        return math.atan2(w2_y - w1_y, w2_x - w1_x)  # Bereken world-yaw
+
+    # =====================================================
+    # Process Frame To Objects
+    # =====================================================
+
+    def process_frame_to_objects(self, frame, depth_frame, detections):
+        object_list = []  # Lijst met geldige objecten
+        best_object = None  # Beste pickbare object
+        best_confidence = 0.0  # Hoogste confidence van pickbaar object
+        dataset_frame = frame.copy()  # Ruwe kopie voor datasetopslag
+
+        if depth_frame.shape[:2] != frame.shape[:2]:  # Controleer of depthformaat gelijk is aan frameformaat
+            depth_frame = cv2.resize(depth_frame, (frame.shape[1], frame.shape[0]), interpolation=cv2.INTER_NEAREST)  # Resize depth naar frameformaat
+
+        for detection in detections:  # Loop door YOLO-detecties
+            confidence = float(detection.confidence)  # Lees confidence
+            if confidence < self.confidence_threshold:  # Filter lage confidence
+                continue  # Sla detectie over
+
+            x_min = int(detection.xmin * frame.shape[1])  # Bereken bbox links
+            x_max = int(detection.xmax * frame.shape[1])  # Bereken bbox rechts
+            y_min = int(detection.ymin * frame.shape[0])  # Bereken bbox boven
+            y_max = int(detection.ymax * frame.shape[0])  # Bereken bbox onder
+            bbox = (x_min, y_min, x_max, y_max)  # Bouw bbox tuple
+            xyz_result = self.estimate_xyz_from_roi(depth_frame, bbox)  # Bereken camera XYZ uit depth-ROI
+
+            if xyz_result is None:  # Controleer of depth geldig is
+                continue  # Sla object zonder geldige depth over
+
+            camera_x, camera_y, camera_z, z_mm, center_x, center_y = xyz_result  # Pak spatial resultaat uit
+            image_yaw = self.estimate_yaw_from_depth_roi(depth_frame, bbox, z_mm)  # Bereken PCA-yaw in beeldvlak
+            world_x, world_y, world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer camera XYZ naar world XYZ
+            world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_yaw)  # Transformeer beeld-yaw naar world-yaw
+
+            obj = {  # Bouw intern objectrecord
+                "object_id": str(uuid.uuid4()),
+                "class": int(detection.label),
+                "confidence": confidence,
+                "x": world_x,
+                "y": world_y,
+                "z": world_z,
+                "camera_x": camera_x,
+                "camera_y": camera_y,
+                "camera_z": camera_z,
+                "yaw": world_yaw,
+                "image_yaw": image_yaw,
+                "bbox": bbox,
+                "robot_pickable": False
+            }
+
+            obj["robot_pickable"] = self.is_robot_pickable(obj)  # Bepaal of object geschikt is voor robot
+            object_list.append(obj)  # Voeg object toe aan objectlijst
+
+            if obj["robot_pickable"] and confidence > best_confidence:  # Kies beste pickbare object
+                best_confidence = confidence  # Update hoogste confidence
+                best_object = obj  # Update beste object
+
+            class_name = YOLO_CLASS_NAMES.get(int(detection.label), f"class_{int(detection.label)}")  # Zoek klassenaam
+            color = (0, 255, 0) if obj["robot_pickable"] else (0, 165, 255)  # Groen is pickbaar, oranje is gefilterd
+            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, 2)  # Teken boundingbox
+            cv2.putText(frame, f"{class_name} {confidence:.2f}", (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)  # Teken label
+            self.draw_yaw_axis(frame, bbox, image_yaw)  # Teken PCA-richting
+
+        return (object_list, best_object, dataset_frame, frame)  # Geef objecten, beste object, datasetframe en gemarkeerd frame terug
+
+    # =====================================================
+    # Draw PCA Yaw Axis
+    # =====================================================
+
+    def draw_yaw_axis(self, frame, bbox, yaw):
+        x_min, y_min, x_max, y_max = bbox  # Lees bbox uit
+        center_x = int((x_min + x_max) / 2)  # Bereken bboxcentrum X
+        center_y = int((y_min + y_max) / 2)  # Bereken bboxcentrum Y
+        axis_length = int(min(x_max - x_min, y_max - y_min) * 0.4)  # Bepaal aslengte
+        end_x = int(center_x + axis_length * math.cos(yaw))  # Bereken eindpunt X
+        end_y = int(center_y + axis_length * math.sin(yaw))  # Bereken eindpunt Y
+        cv2.line(frame, (center_x, center_y), (end_x, end_y), (255, 0, 0), 2)  # Teken yaw-as
+
+    # =====================================================
+    # Process Object Request
+    # =====================================================
+
+    def process_object_request(self, timeout_sec):
+        packet_result = self.get_synced_packets(timeout_sec)  # Haal synced packets op
+        if packet_result is None:  # Controleer of packetset beschikbaar is
+            self.get_logger().warn("Object request failed: no synced packets available")  # Log ontbrekende packets
+            return None  # Stop zonder object
+
+        nn_frame_packet, detection_packet, depth_packet = packet_result  # Pak packetset uit
+        frame = nn_frame_packet.getCvFrame()  # Haal NN-frame op
+        depth_frame = depth_packet.getFrame()  # Haal depthframe op
+        frame, calibrated = self.estimate_aruco_pose(frame)  # Bepaal ArUco world pose
+
+        if not calibrated:  # Controleer of world calibration gelukt is
+            self.get_logger().warn("Object request rejected: ArUco marker not detected")  # Log ontbrekende ArUco marker
+            return None  # Stop zonder object
+
+        object_list, best_object, dataset_frame, marked_frame = self.process_frame_to_objects(frame, depth_frame, detection_packet.detections)  # Verwerk detecties naar objecten
+
+        if len(object_list) == 0:  # Controleer of er objecten over zijn
+            self.get_logger().warn("Object request failed: no valid objects with depth")  # Log geen geldige objecten
+            return None  # Stop zonder object
+
+        if SAVE_DATASET_ON_REQUEST:  # Controleer dataset trigger
+            self.save_dataset_sample(dataset_frame, object_list)  # Sla datasetopname op
+
+        self.publish_object_array(object_list)  # Publiceer alle objecten naar UI
+
+        if best_object is None:  # Controleer of robotgeschikt object bestaat
+            self.get_logger().warn("Object request failed: no robot-pickable object")  # Log geen robotobject
+            return None  # Stop zonder robotobject
+
+        self.marked_image_pub.publish(self.bridge.cv2_to_imgmsg(marked_frame, encoding="bgr8"))  # Publiceer gemarkeerd beeld
+        return best_object  # Geef beste object terug
+
+    # =====================================================
+    # Publish Object Array
+    # =====================================================
+
+    def publish_object_array(self, object_list):
+        ui_msg = ObjectDataArray()  # Maak ObjectDataArray message
+        ui_msg.objects = []  # Initialiseer objectlijst
+        for obj in object_list:  # Loop door interne objectrecords
+            object_msg = self.convert_to_ros_msg(obj)  # Converteer object naar ROS-message
+            ui_msg.objects.append(object_msg)  # Voeg objectmessage toe
+        self.object_ui_pub.publish(ui_msg)  # Publiceer array naar UI-topic
+
+    # =====================================================
+    # Transform To World
+    # =====================================================
+
+    def transform_to_world(self, x, y, z):
+        if self.tvec is None or self.rvec is None:  # Controleer of ArUco pose beschikbaar is
+            raise RuntimeError("Cannot transform point: ArUco world calibration is unavailable")  # Geef fout bij ontbrekende pose
+
+        rotation_marker_to_camera, _ = cv2.Rodrigues(self.rvec)  # Zet rvec om naar rotatiematrix
+        rotation_camera_to_marker = rotation_marker_to_camera.T  # Inverteer rotatie
+        translation_camera_to_marker = (-rotation_camera_to_marker @ self.tvec)  # Inverteer translatie
+        point_camera = np.array([[x], [y], [z]], dtype=np.float64)  # Bouw punt in cameracoördinaten
+        point_marker = rotation_camera_to_marker @ point_camera + translation_camera_to_marker  # Transformeer camera naar markerframe
+        point_world = point_marker + np.array([[ARUCO_WORLD_X], [ARUCO_WORLD_Y], [ARUCO_WORLD_Z]], dtype=np.float64)  # Voeg marker-world offset toe
+
+        return (float(point_world[0, 0]), float(point_world[1, 0]), float(point_world[2, 0]))  # Geef world XYZ terug
+
+    # =====================================================
+    # Reconnect Camera
     # =====================================================
 
     def reconnect_camera(self):
-
-        self.get_logger().warn("Camera disconnected")
-        
-        self.running = False
-        self.watchdog_running = False
+        if not self.reconnect_lock.acquire(blocking=False):  # Controleer of reconnect al loopt
+            return  # Stop wanneer al een reconnect actief is
 
         try:
-            if self.device is not None:
-                self.device.close()
-        except Exception:
-            pass
-
-        self.device = None
-        self.pipeline = None
-
-        # reset queues
-        self.rgb_queue = None
-        self.depth_queue = None
-        self.detection_queue = None
-
-        # wait a bit before retry
-        time.sleep(RECONNECT_INTERVAL)
-
-        self.initialize_camera()
-
-
-    # =====================================================
-    # WATCHDOG LOOP
-    # =====================================================
-
-    def _watchdog_loop(self):
-
-        self.get_logger().info("DepthAI watchdog started")
-        last_frame_time = time.time()
-
-        while self.watchdog_running:
+            self.get_logger().warn("Camera disconnected")  # Log camera disconnect
+            self.running = False  # Stop normale processing
+            self.watchdog_running = False  # Stop watchdog
             try:
-                # -----------------------------
-                # Check if device exists
-                # -----------------------------
-                if self.device is None:
-                    time.sleep(1)
-                    continue
+                if self.device is not None:  # Controleer bestaand device
+                    self.device.close()  # Sluit device
+            except Exception:
+                pass  # Negeer sluitfouten
 
-                # -----------------------------
-                # Check RGB queue health
-                # -----------------------------
-                if self.rgb_queue is not None:
+            self.device = None  # Wis device
+            self.pipeline = None  # Wis pipeline
+            self.rgb_queue = None  # Wis RGB queue
+            self.depth_queue = None  # Wis depth queue
+            self.detection_queue = None  # Wis detection queue
+            self.nn_frame_queue = None  # Wis NN-frame queue
+            self.camera_control_queue = None  # Wis control queue
+            self.initialize_camera()  # Maak opnieuw verbinding
+            self.set_awb_mode(self.use_hardware_awb)  # Herstel AWB instelling
+        finally:
+            self.reconnect_lock.release()  # Geef reconnectlock vrij
 
-                    try:
-                        frame = self.rgb_queue.tryGet()
+    # =====================================================
+    # Synced Packet Fetch
+    # =====================================================
 
-                        if frame is not None:
-                            last_frame_time = time.time()
-                            self.stale_counter = 0
+    def get_synced_packets(self, timeout_sec):
+        end_time = time.monotonic() + timeout_sec  # Bepaal timeouttijdstip
+        nn_frames = {}  # Buffer voor NN-frames
+        detections = {}  # Buffer voor detectiepakketten
+        depths = {}  # Buffer voor depthpakketten
+        latest_depth_packet = None  # Laatste depthpacket als fallback
 
-                    except Exception:
-                        self.stale_counter += 1
+        while time.monotonic() < end_time:  # Loop tot timeout
+            nn_frame_packet = self.nn_frame_queue.tryGet()  # Lees NN-frame packet
+            detection_packet = self.detection_queue.tryGet()  # Lees detection packet
+            depth_packet = self.depth_queue.tryGet()  # Lees depth packet
 
-                # -----------------------------
-                # Detect freeze condition
-                # -----------------------------
-                if time.time() - last_frame_time > 3.0:
-                    self.stale_counter += 1
+            if nn_frame_packet is not None:  # Controleer NN-frame
+                nn_frames[nn_frame_packet.getSequenceNum()] = nn_frame_packet  # Buffer NN-frame op sequence number
+                self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
 
-                # -----------------------------
-                # Trigger reconnect
-                # -----------------------------
-                if self.stale_counter > 5:
-                    self.get_logger().warn("Watchdog triggered reconnect (camera stale)")
-                    self.reconnect_camera()
-                    return
-                time.sleep(1.0)
+            if detection_packet is not None:  # Controleer detection packet
+                detections[detection_packet.getSequenceNum()] = detection_packet  # Buffer detecties op sequence number
 
-            except Exception as e:
-                self.get_logger().warn(f"Watchdog error: {e}")
-                time.sleep(1.0)
+            if depth_packet is not None:  # Controleer depth packet
+                depths[depth_packet.getSequenceNum()] = depth_packet  # Buffer depth op sequence number
+                latest_depth_packet = depth_packet  # Update fallback depthpacket
+
+            exact_sequences = set(nn_frames.keys()).intersection(detections.keys()).intersection(depths.keys())  # Zoek exacte match tussen frame/detecties/depth
+            if len(exact_sequences) > 0:  # Controleer of exacte match bestaat
+                sequence = max(exact_sequences)  # Gebruik nieuwste match
+                return (nn_frames[sequence], detections[sequence], depths[sequence])  # Geef exacte packetset terug
+
+            frame_detection_sequences = set(nn_frames.keys()).intersection(detections.keys())  # Zoek frame/detectie match
+            if len(frame_detection_sequences) > 0 and latest_depth_packet is not None:  # Controleer fallback met laatste depth
+                sequence = max(frame_detection_sequences)  # Gebruik nieuwste frame/detectie match
+                return (nn_frames[sequence], detections[sequence], latest_depth_packet)  # Geef fallback packetset terug
+
+            time.sleep(0.005)  # Beperk CPU-belasting
+
+        return None  # Geef None terug bij timeout
+
+    # =====================================================
+    # Watchdog Loop
+    # =====================================================
+
+    def watchdog_loop(self):
+        self.get_logger().info("DepthAI watchdog started")  # Log watchdogstart
+        while self.watchdog_running:  # Loop zolang watchdog actief is
+            try:
+                frame_age = time.monotonic() - self.last_rgb_frame_time  # Bereken leeftijd van laatste frame
+                if self.running and frame_age > WATCHDOG_TIMEOUT_SEC:  # Controleer stale stream
+                    self.get_logger().warn("DepthAI watchdog detected a stale RGB stream")  # Log stale stream
+                    reconnect_thread = threading.Thread(target=self.reconnect_camera, daemon=True)  # Maak reconnectthread
+                    reconnect_thread.start()  # Start reconnectthread
+                    return  # Stop huidige watchdog
+                time.sleep(WATCHDOG_INTERVAL_SEC)  # Wacht tot volgende watchdogcheck
+            except Exception as ex:
+                self.get_logger().warn(f"Watchdog error: {ex}")  # Log watchdogfout
+                time.sleep(WATCHDOG_INTERVAL_SEC)  # Voorkom snelle foutlus
+
+    # =====================================================
+    # Object Request Callback
+    # =====================================================
 
     def object_request_callback(self, request, response):
+        with self.processing_lock:  # Blokkeer gelijktijdige objectaanvragen
+            if not self.running or self.device is None:  # Controleer camera actief
+                response.success = False  # Markeer response mislukt
+                return response  # Geef response terug
 
-        # Store request parameters
-        self.confidence_threshold = float(request.confidence_threshold)
+            self.confidence_threshold = float(request.confidence_threshold)  # Lees confidencegrens uit request
+            self.get_logger().info("Object request received")  # Log nieuwe aanvraag
+            best_object = self.process_object_request(timeout_sec=2.0)  # Verwerk één objectaanvraag
 
-        # Trigger processing flag
-        self.publish_requested = True
-        self.request_timestamp = self.get_clock().now()
+            if best_object is None:  # Controleer of object gevonden is
+                response.success = False  # Markeer response mislukt
+                return response  # Geef response terug
 
-        # Reset previous result
-        self.latest_selected_object = None
-        self.get_logger().info("Object request received")
-        self.get_logger().info(f"Confidence: {self.confidence_threshold}")
-
-        response.success = True
-        return response
-
-    def vision_processing_loop(self):
-        # SAFETY CHECKS
-        if not self.running or self.device is None:
-            return
-
-        if self.rgb_queue is None or self.detection_queue is None:
-            return
-
-        # GET DATA
-        rgb_packet = self.rgb_queue.tryGet()
-        det_packet = self.detection_queue.tryGet()
-
-        if rgb_packet is None or det_packet is None:
-            return
-
-        frame = rgb_packet.getCvFrame()
-        detections = det_packet.detections
-
-        # PROCESS DETECTIONS
-        object_list = []
-        best_object = None
-        best_confidence = 0.0
-
-        for det in detections:
-            confidence = float(det.confidence)
-
-            # Apply dynamic ROS threshold filter
-            if confidence < self.confidence_threshold:
-                continue
-
-            # Convert normalized coords → pixel coords
-            x_min = int(det.xmin * frame.shape[1])
-            x_max = int(det.xmax * frame.shape[1])
-            y_min = int(det.ymin * frame.shape[0])
-            y_max = int(det.ymax * frame.shape[0])
-
-            cx = int((x_min + x_max) / 2)
-            cy = int((y_min + y_max) / 2)
-
-            # Depth placeholder (replace with stereo depth)
-            z = getattr(det, "spatialCoordinates", None)
-            if z is not None:
-                x, y, z = z.x, z.y, z.z
-            else:
-                x, y, z = 0.0, 0.0, 0.0  # TODO depth fallback
-
-            # Yaw estimation placeholder (PCA later)
-            yaw = 0.0  # TODO PCA / contour-based orientation
-
-            obj = {
-                "class": det.label,
-                "confidence": confidence,
-                "x": x,
-                "y": y,
-                "z": z,
-                "yaw": yaw,
-                "bbox": (x_min, y_min, x_max, y_max),}
-
-            object_list.append(obj)
-
-            # BEST OBJECT SELECTION
-            if confidence > best_confidence:
-                best_confidence = confidence
-                best_object = obj
-
-            class_name = YOLO_CLASS_NAMES.get(det.label, f"class_{det.label}")
-
-            # DRAW BBOX FOR UI
-            cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-            cv2.putText(frame, f"{class_name} {confidence:.2f}", (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0) ,1)
-
-        # UI PUBLISH (ALL OBJECTS)
-        if len(object_list) > 0 and self.publish_requested:
-
-            ui_msg = ObjectDataArray()
-            ui_msg.objects = []  # TODO ROS message mapping
-
-            for obj in object_list:
-                ui_msg.objects.append(self.convert_to_ros_msg(obj))
-
-            self.object_ui_pub.publish(ui_msg)
-
-        # LITE6 SINGLE OBJECT OUTPUT
-        if self.publish_requested and best_object is not None:
-            lite6_msg = self.convert_to_ros_msg(best_object)
-            self.object_L6_pub.publish(lite6_msg)
-            self.get_logger().info(f"Sent to Lite6: {best_object['class']}" f"(conf={best_object['confidence']:.2f})")
-
-            # lock request after sending
-            self.publish_requested = False
-
-        # MARKED IMAGE OUTPUT
-        self.marked_image_pub.publish(self.bridge.cv2_to_imgmsg(frame, encoding="bgr8"))
+            best_object_msg = self.convert_to_ros_msg(best_object)  # Converteer beste object naar ROS-message
+            self.object_L6_pub.publish(best_object_msg)  # Publiceer beste object op debugtopic
+            response.success = True  # Markeer response geslaagd
+            response.object = best_object_msg  # Vul response objectveld
+            return response  # Geef response terug
 
     # =====================================================
-    # ROS Message vullen
+    # Live Preview Loop
+    # =====================================================
+
+    def vision_processing_loop(self):
+        if not self.running or self.device is None:  # Controleer camera actief
+            return  # Stop zonder camera
+
+        if self.rgb_queue is None:  # Controleer RGB queue
+            return  # Stop zonder queue
+
+        rgb_packet = self.rgb_queue.tryGet()  # Lees live RGB-frame
+        if rgb_packet is None:  # Controleer frame beschikbaar
+            return  # Stop zonder frame
+
+        self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
+        frame = rgb_packet.getCvFrame()  # Haal OpenCV-frame op
+        self.latest_frame = frame.copy()  # Bewaar laatste frame
+        self.marked_image_pub.publish(self.bridge.cv2_to_imgmsg(frame, encoding="bgr8"))  # Publiceer live preview
+
+    # =====================================================
+    # Robot Filtering
+    # =====================================================
+
+    def is_robot_pickable(self, obj):
+        if not ROBOT_FILTER_ENABLED:  # Controleer of robotfilter uit staat
+            return True  # Accepteer object direct
+
+        if int(obj["class"]) not in ROBOT_ALLOWED_CLASS_IDS:  # Controleer toegestane klasse
+            return False  # Weiger object met verboden klasse
+
+        if float(obj["confidence"]) < ROBOT_MIN_CONFIDENCE:  # Controleer minimale robotconfidence
+            return False  # Weiger object met lage confidence
+
+        if not (ROBOT_MIN_X_M <= obj["x"] <= ROBOT_MAX_X_M):  # Controleer X-bereik
+            self.get_logger().warn("Found object was out of bounds (X) and will be ignored")  # Log X buiten bereik
+            return False  # Weiger object buiten X-bereik
+
+        if not (ROBOT_MIN_Y_M <= obj["y"] <= ROBOT_MAX_Y_M):  # Controleer Y-bereik
+            self.get_logger().warn("Found object was out of bounds (Y) and will be ignored")  # Log Y buiten bereik
+            return False  # Weiger object buiten Y-bereik
+
+        if not (ROBOT_MIN_Z_M <= obj["z"] <= ROBOT_MAX_Z_M):  # Controleer Z-bereik
+            self.get_logger().warn("Found object was out of bounds (Z) and will be ignored")  # Log Z buiten bereik
+            return False  # Weiger object buiten Z-bereik
+
+        return True  # Object is geschikt voor robot
+
+    # =====================================================
+    # ROS Message Vullen
     # =====================================================
 
     def convert_to_ros_msg(self, obj):
-
-        msg = ObjectData()
-        msg.object_class = YOLO_CLASS_NAMES.get(obj["class"], f"class_{obj['class']}")
-        msg.object_id = str(uuid.uuid4())
-
-        msg.transform.header.stamp
-        msg.transform.header.frame_id
-        msg.transform.child_frame_id
-
-        msg.transform.transform.translation.x
-        msg.transform.transform.translation.y
-        msg.transform.transform.translation.z
-
-        msg.transform.transform.rotation
-
-        return msg
+        msg = ObjectData()  # Maak ObjectData message
+        msg.object_class = YOLO_CLASS_NAMES.get(obj["class"], f"class_{obj['class']}")  # Vul objectklasse
+        msg.object_id = obj["object_id"]  # Vul stabiel object-ID
+        msg.confidence = float(obj["confidence"])  # Vul confidencewaarde
+        msg.transform.header.stamp = self.get_clock().now().to_msg()  # Vul timestamp
+        msg.transform.header.frame_id = "world"  # Zet parent frame op world
+        msg.transform.child_frame_id = f"detected_object_{obj['object_id']}"  # Zet child frame op uniek objectframe
+        msg.transform.transform.translation.x = float(obj["x"])  # Vul X-positie
+        msg.transform.transform.translation.y = float(obj["y"])  # Vul Y-positie
+        msg.transform.transform.translation.z = float(obj["z"])  # Vul Z-positie
+        yaw = float(obj["yaw"])  # Lees yawhoek
+        msg.transform.transform.rotation.x = 0.0  # Vul quaternion X
+        msg.transform.transform.rotation.y = 0.0  # Vul quaternion Y
+        msg.transform.transform.rotation.z = math.sin(yaw / 2.0)  # Vul quaternion Z uit yaw
+        msg.transform.transform.rotation.w = math.cos(yaw / 2.0)  # Vul quaternion W uit yaw
+        return msg  # Geef ObjectData message terug
 
     # =====================================================
     # Dataset Logger
     # =====================================================
 
     def save_dataset_sample(self, image, detections):
-        
-        uid = str(uuid.uuid4())
-        base_path = Path(self.DATASET_FOLDER)
+        if image is None:  # Controleer of afbeelding bestaat
+            return False  # Stop zonder opslag
 
-        # Checken of de folders bestaan
-        (base_path / "images").mkdir(parents=True, exist_ok=True)
-        (base_path / "labels").mkdir(parents=True, exist_ok=True)
-        (base_path / "metadata").mkdir(parents=True, exist_ok=True)
+        if len(detections) == 0:  # Controleer of detecties bestaan
+            return False  # Stop zonder opslag
 
-        # Items opslaan
-        image_file = base_path / "images" / f"{uid}.jpg"
-        label_file = base_path / "labels" / f"{uid}.txt"
-        meta_file = base_path / "metadata" / f"{uid}.json"
+        uid = str(uuid.uuid4())  # Maak unieke dataset-ID
+        (self.base_path / "images").mkdir(parents=True, exist_ok=True)  # Maak afbeeldingenmap aan
+        (self.base_path / "labels").mkdir(parents=True, exist_ok=True)  # Maak labelmap aan
+        (self.base_path / "metadata").mkdir(parents=True, exist_ok=True)  # Maak metadatamap aan
+        image_file = self.base_path / "images" / f"{uid}.jpg"  # Bouw afbeeldingspad
+        label_file = self.base_path / "labels" / f"{uid}.txt"  # Bouw labelpad
+        metadata_file = self.base_path / "metadata" / f"{uid}.json"  # Bouw metadatapad
+        image_saved = cv2.imwrite(str(image_file), image)  # Sla afbeelding op
 
-        # SAVE IMAGE
-        cv2.imwrite(str(image_file), image)
+        if not image_saved:  # Controleer of afbeelding opgeslagen is
+            self.get_logger().error(f"Failed to save dataset image: {image_file}")  # Log opslagfout
+            return False  # Stop bij opslagfout
 
-        # SAVE LABELS (YOLO FORMAT)
-        h, w = image.shape[:2]
+        image_height, image_width = image.shape[:2]  # Lees afbeeldingsformaat
+        with open(label_file, "w", encoding="utf-8") as label_handle:  # Open YOLO-labelbestand
+            for detection in detections:  # Loop door detecties
+                x_min, y_min, x_max, y_max = detection["bbox"]  # Lees bbox
+                x_center = ((x_min + x_max) / 2.0 / image_width)  # Bereken YOLO x-center
+                y_center = ((y_min + y_max) / 2.0 / image_height)  # Bereken YOLO y-center
+                box_width = ((x_max - x_min) / image_width)  # Bereken YOLO breedte
+                box_height = ((y_max - y_min) / image_height)  # Bereken YOLO hoogte
+                class_id = int(detection["class"])  # Lees class-ID
+                label_handle.write(f"{class_id} {x_center:.6f} {y_center:.6f} {box_width:.6f} {box_height:.6f}\n")  # Schrijf YOLO-labelregel
 
-        with open(label_file, "w") as f:
-            for det in detections:
+        metadata = {  # Bouw metadata dictionary
+            "id": uid,
+            "objects": [
+                {
+                    "object_id": detection["object_id"],
+                    "class_id": int(detection["class"]),
+                    "class_name": YOLO_CLASS_NAMES.get(int(detection["class"]), f"class_{int(detection['class'])}"),
+                    "confidence": float(detection["confidence"]),
+                    "x": float(detection["x"]),
+                    "y": float(detection["y"]),
+                    "z": float(detection["z"]),
+                    "camera_x": float(detection["camera_x"]),
+                    "camera_y": float(detection["camera_y"]),
+                    "camera_z": float(detection["camera_z"]),
+                    "yaw": float(detection["yaw"]),
+                    "image_yaw": float(detection["image_yaw"]),
+                    "robot_pickable": bool(detection["robot_pickable"])
+                }
+                for detection in detections
+            ]
+        }
 
-                # TODO: ensure det has bbox in pixel coords
-                x_min, y_min, x_max, y_max = det["bbox"]
+        with open(metadata_file, "w", encoding="utf-8") as metadata_handle:  # Open metadatafile
+            json.dump(metadata, metadata_handle, indent=2)  # Schrijf metadata als JSON
 
-                x_center = ((x_min + x_max) / 2) / w
-                y_center = ((y_min + y_max) / 2) / h
-                bw = (x_max - x_min) / w
-                bh = (y_max - y_min) / h
-
-                class_id = YOLO_CLASS_MAPPING[det["class"]]
-
-                f.write(f"{class_id} {x_center} {y_center} {bw} {bh}\n")
-
-        # SAVE METADATA (FOR ROBOTICS / TF / ANALYSIS)
-        metadata = {"id": uid, "objects": [{
-            "class": det["class"],
-            "confidence": det["confidence"],
-            "x": det["x"],
-            "y": det["y"],
-            "z": det["z"],
-            "yaw": det["yaw"]
-        } for det in detections]}
-
-        with open(meta_file, "w") as f:
-            json.dump(metadata, f, indent=2)
+        self.get_logger().info(f"Dataset sample saved: {uid}")  # Log datasetopslag
+        return True  # Meld succesvolle opslag
 
     # =====================================================
     # Main Loop
     # =====================================================
 
     def main_loop(self):
-
-        if not self.running:
-            return
+        if not self.running:  # Controleer of node actief is
+            return  # Stop wanneer camera niet draait
 
         try:
-            self.vision_processing_loop()
-
+            self.vision_processing_loop()  # Voer live preview loop uit
         except Exception as ex:
-            self.get_logger().error(str(ex))
-            reconnect_thread = (threading.Thread(target=self.reconnect_camera, daemon=True))
-            reconnect_thread.start()
-
+            self.get_logger().error(str(ex))  # Log fout
+            reconnect_thread = threading.Thread(target=self.reconnect_camera, daemon=True)  # Maak reconnectthread
+            reconnect_thread.start()  # Start reconnectthread
 
 # =========================================================
 # Main
 # =========================================================
 
 def main(args=None):
-
-    rclpy.init(args=args)
-    node = VisionNode()
-
+    rclpy.init(args=args)  # Initialiseer ROS2
+    node = VisionNode()  # Maak VisionNode aan
     try:
-        rclpy.spin(node)
-
+        rclpy.spin(node)  # Laat ROS2 node draaien
     except KeyboardInterrupt:
-        pass
-
+        pass  # Stop netjes bij Ctrl+C
     finally:
         try:
-            if node.device is not None:
-                node.device.close()
-
+            if node.device is not None:  # Controleer of device open is
+                node.device.close()  # Sluit DepthAI-device
         except Exception:
-            pass
-
-        node.destroy_node()
-        rclpy.shutdown()
+            pass  # Negeer sluitfouten
+        node.destroy_node()  # Vernietig ROS2 node
+        rclpy.shutdown()  # Sluit ROS2 af
 
 if __name__ == "__main__":
-    main()
+    main()  # Start main wanneer bestand direct wordt uitgevoerd
