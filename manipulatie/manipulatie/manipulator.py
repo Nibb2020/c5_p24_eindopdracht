@@ -14,6 +14,7 @@ from std_msgs.msg import String
 import threading
 from xarm_msgs.srv import VacuumGripperCtrl
 import time
+from std_srvs.srv import Trigger
 
 
 class manipulatorController(Node):
@@ -56,13 +57,19 @@ class manipulatorController(Node):
         #status publisher
         self.status_pub = self.create_publisher(String, "manipulator/status", 10)
 
+        #move home service
+        self.manipulator_move_home = self.create_service(Trigger,"manipulator/move_home",self.move_home_callback)
+
         # interne state
         self.running = False
+        self.home_requested = False
         self.lock = threading.Lock()
 
         #gripper opstarten
         self.vacuum_gripper = VacuumGripper()
         self.vacuum_gripper.open()
+
+        #self.move_to_state("up")
 
         self.get_logger().info("Lite6 manipulator node has been initialized.")
 
@@ -77,38 +84,26 @@ class manipulatorController(Node):
         self.get_logger().info(f"Moving to state '{state_name}'.")
         self.move_group.move_to_configuration(joint_values)
 
-    def move_to_pose(self, translation, rotation):
+    def move_to_pose(self, translation, yaw):
+        roll = 3.14159      #180 graden
+        pitch = 0.1396    #8 graden
+        rotation = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
+
         self.get_logger().info(f"Moving to pose: {translation}, {rotation}")
         self.move_group.move_to_pose(translation, rotation)
 
-    def move_to_tf(self, from_frame: str, to_frame: str):
-        try:
-            t = self.tf_buffer.lookup_transform(
-                to_frame, from_frame, rclpy.time.Time()
-            )
-            translation = [
-                t.transform.translation.x,
-                t.transform.translation.y,
-                t.transform.translation.z,
-            ]
-            rotation = [
-                t.transform.rotation.w,
-                t.transform.rotation.x,
-                t.transform.rotation.y,
-                t.transform.rotation.z,
-            ]
-            self.get_logger().info(f"Moving to transform: {from_frame} → {to_frame}")
-            self.move_to_pose(translation, rotation)
-        except TransformException as ex:
-            self.get_logger().warn(f"Could not transform {to_frame} to {from_frame}: {ex}")
+    def move_to_pose_offset(self, yaw, z_offset=0.1):
+        translation_z_offset = [self.translation[0], self.translation[1], self.translation[2] + z_offset]
+        self.move_to_pose(translation_z_offset, yaw)
 
     # --- App sequence ----------------------------------------------------
 
     def start_ontvangen(self, request, response):
         self.get_logger().info(f"Service ontvangen, voorwerp is: {request.klasse}")
         self.klasse = request.klasse
-        self.tranlation = request.translation
-        self.rotation = request.rotation
+        self.translation = request.translation
+        self.translation[2] = 0.080
+        self.yaw_rotation = request.rotation
 
         with self.lock:
             if self.running:
@@ -126,9 +121,8 @@ class manipulatorController(Node):
 
         response.succes = True
         return response
-    
-    def _run_process(self):
 
+    def _run_process(self):
         try:
             self.publish_status("Initialisatie...")
 
@@ -136,9 +130,13 @@ class manipulatorController(Node):
 
             self.publish_status("Robot beweging gestart")
 
-            self.execute_app()   # jouw bestaande logica
+            self.execute_app()
 
-            self.publish_status("Klaar")
+            if self.home_is_requested():
+                self.publish_status("Sequence onderbroken, robot gaat naar up positie")
+                self.move_to_home()
+            else:
+                self.publish_status("Klaar")
 
         except Exception as e:
             self.publish_status(f"Fout: {str(e)}")
@@ -146,20 +144,34 @@ class manipulatorController(Node):
         finally:
             with self.lock:
                 self.running = False
+                self.home_requested = False
 
+    #status publisher
     def publish_status(self, msg: str):
         status = String()
         status.data = msg
         self.status_pub.publish(status)
         self.get_logger().info(msg)
 
+    #echte logica
     def execute_app(self):
         self.move_to_state("home")
+        if self.home_is_requested():
+            return
 
-        self.move_to_state("right")
+        self.move_to_pose_offset(   self.yaw_rotation)
+        if self.home_is_requested():
+            return
+
+        self.move_to_pose(self.translation, self.yaw_rotation)
+        if self.home_is_requested():
+            return
 
         self.vacuum_gripper.close()
-        
+
+        if self.home_is_requested():
+            return
+
         if self.klasse == "hooi":
             self.move_to_state("drop1")
         elif self.klasse == "kanon":
@@ -169,14 +181,67 @@ class manipulatorController(Node):
         elif self.klasse == "blauw":
             self.move_to_state("drop4")
         else:
-            self.get_logger().warn("Sorry, er is geen object van een van de vier klasse gedecteerd")
+            self.get_logger().warn("Sorry, er is geen object van een van de vier klasse gedetecteerd")
             self.move_to_state("home")
 
+        if self.home_is_requested():
+            return
 
         self.vacuum_gripper.open()
 
+        if self.home_is_requested():
+            return
+
         self.move_to_state("up")
-        True
+
+    
+
+
+#move home functies
+    def move_home_callback(self, request, response):
+        self.get_logger().info("Move home service ontvangen")
+
+        with self.lock:
+            if self.running:
+                self.home_requested = True
+                response.success = True
+                response.message = "Move home requested. Current planned movement will finish first."
+                return response
+
+            self.running = True
+            self.home_requested = False
+
+        thread = threading.Thread(target=self._run_home_process, daemon=True)
+        thread.start()
+
+        response.success = True
+        response.message = "Robot is moving to up position."
+        return response
+    
+    def _run_home_process(self):
+        try:
+            self.publish_status("Robot gaat naar up positie")
+            self.move_to_home()
+            self.publish_status("Robot staat in up positie")
+
+        except Exception as e:
+            self.publish_status(f"Fout tijdens move_home: {str(e)}")
+
+        finally:
+            with self.lock:
+                self.running = False
+                self.home_requested = False
+    
+    def home_is_requested(self):
+        with self.lock:
+            return self.home_requested
+
+
+    def move_to_home(self):
+        self.vacuum_gripper.open()
+
+        self.move_to_state("up")
+
 
 class VacuumGripper(Node):
     def __init__(self):
@@ -202,6 +267,7 @@ class VacuumGripper(Node):
         self.future = self.gripper.call_async(self.request)
         time.sleep(2.0)
         return self.future
+
 
 # --------------------------------------------------------------------------
 # Do not modify the main function unless necessary.

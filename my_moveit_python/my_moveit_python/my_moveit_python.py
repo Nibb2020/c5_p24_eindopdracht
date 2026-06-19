@@ -51,6 +51,9 @@ class MovegroupHelper(Node):
     def __init__(self, node, joint_names, base_link_name, end_effector_name, group_name):
         super().__init__('move_group_helper')
 
+        #added myself
+        self.node = node
+
         # Create callback group that allows execution of callbacks in parallel without restrictions
         self.callback_group = ReentrantCallbackGroup()
 
@@ -85,6 +88,10 @@ class MovegroupHelper(Node):
         self.cartesian_max_step = 0.0025
         self.cartesian_fraction_threshold = 0.0
 
+        #parameters zelf toegevoegd:
+        self.node.declare_parameter("velocity_scaling", 0.1)
+        self.node.declare_parameter("acceleration_scaling", 0.1)
+
     def wait_for_moveit_services(self, timeout_sec=10.0):
         """Wait for MoveIt2 services to become available."""
         import time
@@ -117,6 +124,9 @@ class MovegroupHelper(Node):
         return True
 
     def move_to_configuration(self, joint_values):
+        #change from me
+        self.update_planning_speed_from_parameters()
+
         self.get_logger().info(f"Moving to {{joint_positions: {list(joint_values)}}}")
         self.moveit2.move_to_configuration(joint_values)
         if self.synchronous:
@@ -152,6 +162,9 @@ class MovegroupHelper(Node):
             self.get_logger().info("Result error code: " + str(future.result().result.error_code))
 
     def move_to_pose(self, position, quat_xyzw, cartesian=True, cartesian_max_step=0.0025, cartesian_fraction_threshold=0.0):
+        #change from me
+        self.update_planning_speed_from_parameters()
+
         self.get_logger().info(f"Moving to {{position: {list(position)}, quat_xyzw: {list(quat_xyzw)}}}")
         self.moveit2.move_to_pose(
             position=position,
@@ -245,3 +258,18 @@ class MovegroupHelper(Node):
         #self.create_timer(0.2, self._servo_circular_motion)
 
 
+    #change from me
+    def update_planning_speed_from_parameters(self):
+        velocity_scaling = self.node.get_parameter("velocity_scaling").value
+        acceleration_scaling = self.node.get_parameter("acceleration_scaling").value
+
+        velocity_scaling = max(0.05, min(float(velocity_scaling), 1.0))
+        acceleration_scaling = max(0.05, min(float(acceleration_scaling), 1.0))
+
+        self.moveit2.max_velocity = velocity_scaling
+        self.moveit2.max_acceleration = acceleration_scaling
+
+        self.get_logger().info(
+            f"Using velocity_scaling={velocity_scaling}, "
+            f"acceleration_scaling={acceleration_scaling}"
+        )
