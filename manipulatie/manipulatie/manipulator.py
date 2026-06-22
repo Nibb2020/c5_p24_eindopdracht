@@ -102,7 +102,7 @@ class manipulatorController(Node):
         self.get_logger().info(f"Service ontvangen, voorwerp is: {request.klasse}")
         self.klasse = request.klasse
         self.translation = request.translation
-        self.translation[2] = 0.080
+        self.translation[2] = 0.1
         self.yaw_rotation = request.rotation
 
         with self.lock:
