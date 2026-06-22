@@ -1,0 +1,5 @@
+string klasse                       #request message: type van het voorwerp
+float64[] translation
+float64 rotation
+---
+bool succes                      #response message: geeft weer dat de manipulator gaat beginnen
