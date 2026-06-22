@@ -8,9 +8,9 @@ import os
 def generate_launch_description():
     # Define the path to the URDF file within the package
     urdf_file_path = os.path.join(
-        get_package_share_directory('my_uf_bringup'),
+        get_package_share_directory('my_uf_description'),
         'urdf',
-        'environment.urdf.xacro'
+        'assembly.urdf.xacro'
     )
 
     # Define the path to the RViz configuration file within the package
