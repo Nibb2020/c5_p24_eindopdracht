@@ -1,37 +1,37 @@
-cmake_minimum_required(VERSION 3.8)
-project(project_interfaces)
+cmake_minimum_required(VERSION 3.8)  # Minimale CMake versie
+project(project_interfaces)  # Package naam
 
-if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
-  add_compile_options(-Wall -Wextra -Wpedantic)
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")  # Compilercheck
+  add_compile_options(-Wall -Wextra -Wpedantic)  # Compilerwarnings aanzetten
 endif()
 
-# find dependencies
-find_package(ament_cmake REQUIRED)
-# uncomment the following section in order to fill in
-# further dependencies manually.
-# find_package(<dependency> REQUIRED)
+# Dependencies
+find_package(ament_cmake REQUIRED)  # Basis voor ament_cmake package
+find_package(rosidl_default_generators REQUIRED)  # Nodig voor msg/srv generatie
+find_package(geometry_msgs REQUIRED)  # Nodig voor geometry_msgs/TransformStamped
 
-if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  # the following line skips the linter which checks for copyrights
-  # comment the line when a copyright and license is added to all source files
-  set(ament_cmake_copyright_FOUND TRUE)
-  # the following line skips cpplint (only works in a git repo)
-  # comment the line when this package is in a git repo and when
-  # a copyright and license is added to all source files
-  set(ament_cmake_cpplint_FOUND TRUE)
-  ament_lint_auto_find_test_dependencies()
-endif()
-
-find_package(rosidl_default_generators REQUIRED)
-
-set(msg_files
-  "srv/VoorwerpData.srv"
-  "srv/Manipulator.srv"
+# Interface files
+set(interface_files
+  "srv/VoorwerpData.srv"  # Manipulator service
+  "srv/Manipulator.srv"  # Manipulator service
+  "srv/GetObjectData.srv"  # Vision service
+  "msg/ObjectData.msg"  # Vision object message
+  "msg/ObjectDataArray.msg"  # Vision object array message
 )
 
+# Generate interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
-  ${msg_files}
+  ${interface_files}  # Alle interfacebestanden
+  DEPENDENCIES geometry_msgs  # Externe message dependency
 )
 
-ament_package()
+# Testing
+if(BUILD_TESTING)
+  find_package(ament_lint_auto REQUIRED)  # Zoek linting package
+  set(ament_cmake_copyright_FOUND TRUE)  # Sla copyrightcheck over
+  set(ament_cmake_cpplint_FOUND TRUE)  # Sla cpplint over
+  ament_lint_auto_find_test_dependencies()  # Activeer lint tests
+endif()
+
+ament_export_dependencies(rosidl_default_runtime)  # Exporteer gegenereerde interface runtime
+ament_package()  # Sluit package af

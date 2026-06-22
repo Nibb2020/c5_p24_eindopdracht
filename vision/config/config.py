@@ -4,8 +4,8 @@ import cv2
 # Camera
 # ==================================================
 
-RGB_WIDTH = 1280  # Breedte van RGB/NN-frame
-RGB_HEIGHT = 1280  # Hoogte van RGB/NN-frame
+RGB_WIDTH = 640  # Breedte van RGB/NN-frame
+RGB_HEIGHT = 640  # Hoogte van RGB/NN-frame
 USB_SPEED = "HIGH"  # Gewenste USB-snelheid als tekstwaarde
 USE_DEVICE_CALIBRATION = True  # Gebruik OAK-D EEPROM-calibratie wanneer mogelijk
 
@@ -13,10 +13,10 @@ USE_DEVICE_CALIBRATION = True  # Gebruik OAK-D EEPROM-calibratie wanneer mogelij
 # ROS
 # ==================================================
 
-SERVICE_NAME = "/object_data"  # Service naam voor objectaanvragen
-UI_TOPIC = "/object_data_ui"  # Topic voor alle objecten richting UI
-MARKED_IMAGE_TOPIC = "/marked_foto"  # Topic voor live/gemarkeerde afbeelding
-LITE6_RESULT_TOPIC = "/object_data_result"  # Topic voor beste object richting Lite6/debug
+SERVICE_NAME = "/vision/voorwerp_data"  # Service naam voor objectaanvragen
+UI_TOPIC = "/vision/object_data_ui"  # Topic voor alle objecten richting UI
+MARKED_IMAGE_TOPIC = "/vision/marked_foto"  # Topic voor live/gemarkeerde afbeelding
+LITE6_RESULT_TOPIC = "/vision/object_data_result"  # Topic voor beste object richting Lite6/debug
 
 # ==================================================
 # Reconnect
@@ -53,12 +53,13 @@ DATASET_FOLDER = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vi
 # Model
 # ==================================================
 
-MODEL_PATH = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/yolov8n.rvc2.tar.xz"  # Pad naar YOLO-model
+MODEL_PATH = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/YOLOv6_Nano-R2_COCO_512x288.rvc2.tar.xz"  # Pad naar YOLO-model
 
 # ==================================================
 # YOLO
 # ==================================================
 
+USE_YOLO = False  # Zet YOLO tijdelijk uit
 YOLO_NUM_CLASSES = 5  # Aantal YOLO-klassen
 YOLO_IOU_THRESHOLD = 0.5  # IOU threshold voor YOLO post-processing
 YOLO_DEFAULT_CONFIDENCE = 0.85  # Standaard confidencegrens
@@ -84,7 +85,7 @@ YOLO_CLASS_NAMES = {  # Mapping van class-ID naar klassenaam
 # ==================================================
 
 ARUCO_MARKER_ID = 0  # ID van de vaste world-reference marker
-ARUCO_SIZE_M = 0.05  # Fysieke markermaat in meters
+ARUCO_SIZE_M = 0.07368  # Fysieke markermaat in meters
 ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50  # ArUco dictionary voor markerherkenning
 
 ARUCO_WORLD_X = 0.0  # World X-positie van markerorigin

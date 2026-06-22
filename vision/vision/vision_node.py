@@ -106,9 +106,11 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
         # ArUco
         self.camera_position = None  # Gereserveerd voor camerapositie, momenteel niet actief gebruikt
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARY)  # Laad de ingestelde ArUco dictionary
-        self.aruco_params = cv2.aruco.DetectorParameters()  # Maak ArUco detectieparameters aan
-        self.aruco_detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)  # Maak ArUco detector aan
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARY)  # Laad ingestelde ArUco dictionary
+        if hasattr(cv2.aruco, 'DetectorParameters_create'):  # Controleer oude OpenCV ArUco API
+            self.aruco_params = cv2.aruco.DetectorParameters_create()  # Maak parameters via oude API
+        else:  # Gebruik nieuwe OpenCV ArUco API
+            self.aruco_params = cv2.aruco.DetectorParameters()  # Maak parameters via nieuwe API 
         self.camera_matrix = np.array(CAMERA_MATRIX, dtype=np.float32)  # Zet fallback cameramatrix om naar NumPy
         self.dist_coeffs = np.array(DIST_COEFFS, dtype=np.float32)  # Zet fallback distortioncoëfficiënten om naar NumPy
         self.rvec = None  # Laatst berekende marker-naar-camera rotatievector
@@ -184,62 +186,71 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def create_pipeline(self):
-        self.get_logger().info("Creating DepthAI pipeline...")  # Log pipeline-opbouw
-        pipeline = dai.Pipeline()  # Maak nieuwe DepthAI pipeline
+        self.get_logger().info('Creating DepthAI pipeline...')  # Log dat de pipeline wordt opgebouwd
 
-        # RGB Camera
-        cam_rgb = pipeline.createColorCamera()  # Maak RGB-camera node aan
-        cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)  # Gebruik CAM_A als RGB-camera
-        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)  # Zet sensorresolutie op 4K
-        cam_rgb.setInterleaved(False)  # Gebruik planar output voor NN
-        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)  # Gebruik BGR voor OpenCV
-        cam_rgb.setPreviewSize(RGB_WIDTH, RGB_HEIGHT)  # Zet previewformaat voor YOLO-input
-        cam_rgb.setPreviewKeepAspectRatio(True)  # Behoud aspectratio bij previewcrop
+        pipeline = dai.Pipeline()  # Maak een nieuwe DepthAI pipeline aan
 
-        # Camera Control Input
-        control_in = pipeline.createXLinkIn()  # Maak host-to-device inputstream aan
-        control_in.setStreamName("camera_control")  # Geef controlstream een naam
-        control_in.out.link(cam_rgb.inputControl)  # Koppel controlstream aan RGB-camera
+        cam_rgb = pipeline.create(dai.node.ColorCamera)  # Maak de RGB-camera node aan
+        left = pipeline.create(dai.node.MonoCamera)  # Maak de linker mono-camera node aan
+        right = pipeline.create(dai.node.MonoCamera)  # Maak de rechter mono-camera node aan
+        stereo = pipeline.create(dai.node.StereoDepth)  # Maak de stereo-depth node aan
+        control_in = pipeline.create(dai.node.XLinkIn)  # Maak een host-inputstream voor camera control aan
+        xout_rgb = pipeline.create(dai.node.XLinkOut)  # Maak een host-outputstream voor RGB aan
+        xout_depth = pipeline.create(dai.node.XLinkOut)  # Maak een host-outputstream voor depth aan
 
-        # Stereo Depth
-        left = pipeline.createMonoCamera()  # Maak linker monocamera aan
-        right = pipeline.createMonoCamera()  # Maak rechter monocamera aan
-        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)  # Gebruik CAM_B als linker camera
-        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)  # Gebruik CAM_C als rechter camera
-        left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)  # Zet linker mono op 800p
-        right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)  # Zet rechter mono op 800p
-        stereo = pipeline.createStereoDepth()  # Maak StereoDepth node aan
-        stereo.setDefaultProfilePreset(dai.node.StereoDepth.PresetMode.HIGH_ACCURACY)  # Gebruik nauwkeurig depthprofiel
-        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)  # Lijn depth uit op RGB-camera
-        stereo.setOutputSize(RGB_WIDTH, RGB_HEIGHT)  # Zet aligned depthformaat gelijk aan RGB-preview
-        left.out.link(stereo.left)  # Koppel linker mono-output aan stereo left input
-        right.out.link(stereo.right)  # Koppel rechter mono-output aan stereo right input
+        cam_rgb.setBoardSocket(dai.CameraBoardSocket.CAM_A)  # Selecteer de RGB-camera op CAM_A
+        cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_4_K)  # Zet RGB-sensor op 4K
+        cam_rgb.setInterleaved(False)  # Gebruik planar output in plaats van interleaved output
+        cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)  # Gebruik BGR-volgorde voor OpenCV
+        cam_rgb.setPreviewSize(RGB_WIDTH, RGB_HEIGHT)  # Zet previewformaat vanuit config.py
+        cam_rgb.setPreviewKeepAspectRatio(True)  # Behoud aspect ratio bij het maken van de preview
 
-        # 2D YOLO Network
-        detection_nn = pipeline.create(dai.node.YoloDetectionNetwork)  # Maak 2D YOLO detection node aan
-        detection_nn.setConfidenceThreshold(0.01)  # Zet lage device-confidence; host filtert later
-        detection_nn.setNumClasses(YOLO_NUM_CLASSES)  # Zet aantal YOLO-klassen
-        detection_nn.setCoordinateSize(4)  # Gebruik 4 bboxcoördinaten
-        detection_nn.setAnchors([])  # Gebruik lege anchors voor anchor-free YOLOv8-export
-        detection_nn.setAnchorMasks({})  # Gebruik lege anchor masks voor anchor-free YOLOv8-export
-        detection_nn.setIouThreshold(YOLO_IOU_THRESHOLD)  # Zet IOU threshold
-        detection_nn.setBlobPath(MODEL_PATH)  # Laad YOLO-modelpad
-        cam_rgb.preview.link(detection_nn.input)  # Koppel RGB-preview aan YOLO-input
+        left.setBoardSocket(dai.CameraBoardSocket.CAM_B)  # Selecteer linker mono-camera op CAM_B
+        right.setBoardSocket(dai.CameraBoardSocket.CAM_C)  # Selecteer rechter mono-camera op CAM_C
+        left.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)  # Zet links op 800p
+        right.setResolution(dai.MonoCameraProperties.SensorResolution.THE_800_P)  # Zet rechts op 800p
 
-        # Output Streams
-        xout_rgb = pipeline.createXLinkOut()  # Maak RGB outputstream
-        xout_rgb.setStreamName("rgb")  # Geef RGB streamnaam
-        cam_rgb.preview.link(xout_rgb.input)  # Koppel RGB-preview naar host
-        xout_depth = pipeline.createXLinkOut()  # Maak depth outputstream
-        xout_depth.setStreamName("depth")  # Geef depth streamnaam
-        stereo.depth.link(xout_depth.input)  # Koppel aligned depth naar host
-        xout_det = pipeline.createXLinkOut()  # Maak detection outputstream
-        xout_det.setStreamName("detections")  # Geef detection streamnaam
-        detection_nn.out.link(xout_det.input)  # Koppel YOLO-output naar host
-        xout_nn_frame = pipeline.createXLinkOut()  # Maak NN-passthrough outputstream
-        xout_nn_frame.setStreamName("nn_frame")  # Geef passthrough streamnaam
-        detection_nn.passthrough.link(xout_nn_frame.input)  # Koppel exact NN-inputframe naar host
-        return pipeline  # Geef opgebouwde pipeline terug
+        stereo.setDefaultProfilePreset(  # Stel het stereo-depth profiel in
+            dai.node.StereoDepth.PresetMode.HIGH_ACCURACY  # Gebruik nauwkeuriger depthprofiel
+        )
+        stereo.setLeftRightCheck(True)  # Verwijder inconsistente stereo-matches
+        stereo.setSubpixel(True)  # Gebruik subpixel-disparity voor nauwkeurigere depth
+        stereo.setDepthAlign(dai.CameraBoardSocket.CAM_A)  # Align depth op de RGB-camera
+        stereo.setOutputSize(RGB_WIDTH, RGB_HEIGHT)  # Zet depth-output gelijk aan RGB-previewformaat
+
+        control_in.setStreamName('camera_control')  # Geef de camera-control inputstream een naam
+        xout_rgb.setStreamName('rgb')  # Geef de RGB-outputstream een naam
+        xout_depth.setStreamName('depth')  # Geef de depth-outputstream een naam
+
+        control_in.out.link(cam_rgb.inputControl)  # Koppel host-controlstream aan RGB-camera control-input
+        left.out.link(stereo.left)  # Koppel linker mono-camera aan stereo-depth linker input
+        right.out.link(stereo.right)  # Koppel rechter mono-camera aan stereo-depth rechter input
+        cam_rgb.preview.link(xout_rgb.input)  # Koppel RGB-preview naar host-outputstream
+        stereo.depth.link(xout_depth.input)  # Koppel depth-output naar host-outputstream
+
+        if USE_YOLO:  # Bouw YOLO alleen als er later een geldig .blob model beschikbaar is
+            detection_nn = pipeline.create(dai.node.YoloDetectionNetwork)  # Maak YOLO detection node aan
+            xout_det = pipeline.create(dai.node.XLinkOut)  # Maak detection-outputstream aan
+            xout_nn_frame = pipeline.create(dai.node.XLinkOut)  # Maak NN-frame passthrough-outputstream aan
+
+            detection_nn.setConfidenceThreshold(0.01)  # Zet lage NN-threshold; filteren gebeurt later
+            detection_nn.setNumClasses(YOLO_NUM_CLASSES)  # Zet aantal YOLO-klassen vanuit config.py
+            detection_nn.setCoordinateSize(4)  # Gebruik vier bbox-coördinaten
+            detection_nn.setAnchors([])  # Gebruik lege anchors volgens huidige YOLO-config
+            detection_nn.setAnchorMasks({})  # Gebruik lege anchor masks volgens huidige YOLO-config
+            detection_nn.setIouThreshold(YOLO_IOU_THRESHOLD)  # Zet IOU/NMS-threshold vanuit config.py
+            detection_nn.setBlobPath(MODEL_PATH)  # Laad het DepthAI v2 .blob modelbestand
+
+            xout_det.setStreamName('detections')  # Geef detection-outputstream een naam
+            xout_nn_frame.setStreamName('nn_frame')  # Geef NN-frame stream een naam
+
+            cam_rgb.preview.link(detection_nn.input)  # Koppel RGB-preview aan YOLO-input
+            detection_nn.out.link(xout_det.input)  # Koppel YOLO-detecties naar host-outputstream
+            detection_nn.passthrough.link(xout_nn_frame.input)  # Koppel YOLO-passthrough frame naar host
+        else:
+            self.get_logger().warn('YOLO disabled: running RGB/depth only')  # Log tijdelijke testmodus
+
+        return pipeline  # Geef de complete pipeline terug
 
     # =====================================================
     # Initialize Camera
@@ -258,8 +269,14 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
                     self.rgb_queue = self.device.getOutputQueue("rgb", maxSize=4, blocking=False)  # Maak RGB queue
                     self.depth_queue = self.device.getOutputQueue("depth", maxSize=4, blocking=False)  # Maak depth queue
-                    self.detection_queue = self.device.getOutputQueue("detections", maxSize=4, blocking=False)  # Maak detectiequeue
-                    self.nn_frame_queue = self.device.getOutputQueue("nn_frame", maxSize=4, blocking=False)  # Maak NN-frame queue
+                    
+                    if USE_YOLO:  # Alleen detection queues maken als YOLO actief is
+                        self.detection_queue = self.device.getOutputQueue('detections', maxSize=4, blocking=False)  # Maak detectiequeue
+                        self.nn_frame_queue = self.device.getOutputQueue('nn_frame', maxSize=4, blocking=False)  # Maak NN-frame queue
+                    else:
+                        self.detection_queue = None  # Geen detection queue zonder YOLO
+                        self.nn_frame_queue = None  # Geen NN-frame queue zonder YOLO
+            
                     self.camera_control_queue = self.device.getInputQueue("camera_control")  # Maak camera control queue
                     self.running = True  # Zet node op actief
                     self.last_rgb_frame_time = time.monotonic()  # Reset watchdogtimer
@@ -287,38 +304,69 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def estimate_aruco_pose(self, frame):
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Zet BGR-frame om naar grayscale
-        corners, ids, _ = self.aruco_detector.detectMarkers(gray)  # Detecteer ArUco markers
 
-        if ids is None:  # Controleer of markers gevonden zijn
-            return frame, False  # Stop zonder geldige world calibration
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Zet BGR beeld om naar grayscale
 
-        target_marker_found = False  # Houd bij of de juiste referentiemarker gevonden is
-        for i, marker_id in enumerate(ids.flatten()):  # Loop door gevonden marker IDs
-            if marker_id != self.aruco_marker_id:  # Controleer of dit de juiste marker is
+        corners, ids, _ = cv2.aruco.detectMarkers(  # Detecteer ArUco markers met oude OpenCV API
+            gray,  # Grayscale invoerbeeld
+            self.aruco_dict,  # ArUco dictionary uit config
+            parameters=self.aruco_params  # Detectieparameters
+        )
+
+        if ids is None:  # Controleer of er markers gevonden zijn
+            self.world_calibrated = False  # Zet world calibration uit
+            return frame, False  # Geef frame terug zonder geldige pose
+
+        for i, marker_id in enumerate(ids.flatten()):  # Loop door gevonden marker-ID's
+
+            if int(marker_id) != self.aruco_marker_id:  # Controleer of dit de gewenste marker is
                 continue  # Sla andere markers over
 
-            target_marker_found = True  # Markeer dat referentiemarker gevonden is
-            marker_corners = corners[i].reshape((4, 2)).astype(np.float32)  # Zet markerhoeken naar solvePnP-formaat
+            marker_corners = corners[i].reshape((4, 2)).astype(np.float32)  # Zet corners naar OpenCV formaat
+
             half_size = self.aruco_size_m / 2.0  # Bereken halve markermaat
-            object_points = np.array([[-half_size, half_size, 0.0], [half_size, half_size, 0.0], [half_size, -half_size, 0.0], [-half_size, -half_size, 0.0]], dtype=np.float32)  # Markerhoeken in markerframe
 
-            success, rvec, tvec = cv2.solvePnP(object_points, marker_corners, self.camera_matrix, self.dist_coeffs, flags=cv2.SOLVEPNP_IPPE_SQUARE)  # Bereken markerpose
-            if not success:  # Controleer of poseberekening gelukt is
-                self.world_calibrated = False  # Markeer world calibration ongeldig
-                return frame, False  # Stop zonder geldige pose
+            object_points = np.array(  # Definieer markerhoeken in markercoördinaten
+                [
+                    [-half_size, half_size, 0.0],  # Linksboven
+                    [half_size, half_size, 0.0],  # Rechtsboven
+                    [half_size, -half_size, 0.0],  # Rechtsonder
+                    [-half_size, -half_size, 0.0],  # Linksonder
+                ],
+                dtype=np.float32  # Gebruik float32 voor OpenCV
+            )
 
-            self.rvec = rvec  # Bewaar marker-naar-camera rotatie
-            self.tvec = tvec  # Bewaar marker-naar-camera translatie
-            self.world_calibrated = True  # Markeer world calibration geldig
-            cv2.drawFrameAxes(frame, self.camera_matrix, self.dist_coeffs, self.rvec, self.tvec, self.aruco_size_m)  # Teken markerassen ter controle
-            break  # Stop na eerste geldige referentiemarker
+            success, rvec, tvec = cv2.solvePnP(  # Bereken markerpose t.o.v. camera
+                object_points,  # 3D markerpunten
+                marker_corners,  # 2D beeldpunten
+                self.camera_matrix,  # Cameramatrix
+                self.dist_coeffs,  # Distortioncoëfficiënten
+                flags=cv2.SOLVEPNP_IPPE_SQUARE  # Goede solvePnP methode voor vierkante markers
+            )
 
-        if not target_marker_found:  # Controleer of de juiste marker ontbrak
-            self.world_calibrated = False  # Markeer calibration ongeldig
-            return frame, False  # Stop zonder geldige world calibration
+            if not success:  # Controleer solvePnP resultaat
+                self.world_calibrated = False  # Zet world calibration uit
+                return frame, False  # Geef foutstatus terug
 
-        return frame, self.world_calibrated  # Geef geannoteerd frame en status terug
+            self.rvec = rvec  # Sla rotatievector op
+            self.tvec = tvec  # Sla translatievector op
+            self.world_calibrated = True  # Markeer world calibration als geldig
+
+            cv2.aruco.drawDetectedMarkers(frame, corners, ids)  # Teken gevonden markers
+
+            cv2.drawFrameAxes(  # Teken assen op marker
+                frame,  # Beeld waarop getekend wordt
+                self.camera_matrix,  # Cameramatrix
+                self.dist_coeffs,  # Distortioncoëfficiënten
+                self.rvec,  # Rotatievector
+                self.tvec,  # Translatievector
+                self.aruco_size_m  # Aslengte
+            )
+
+            return frame, True  # Geef frame en successtatus terug
+
+        self.world_calibrated = False  # Geen juiste marker gevonden
+        return frame, False  # Geef frame zonder geldige calibration terug
 
     # =====================================================
     # ROI Depth To Camera XYZ
@@ -809,6 +857,22 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     def main_loop(self):
         if not self.running:  # Controleer of node actief is
             return  # Stop wanneer camera niet draait
+        if not USE_YOLO:  # Draai tijdelijke RGB/depth preview zonder YOLO
+            rgb_packet = self.rgb_queue.tryGet()  # Lees RGB-packet non-blocking
+
+            if rgb_packet is None:  # Geen nieuw frame beschikbaar
+                return  # Stop deze timer-iteratie
+
+            frame = rgb_packet.getCvFrame()  # Haal OpenCV-frame op
+            self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
+
+            frame, _ = self.estimate_aruco_pose(frame)  # Probeer ArUco-pose te schatten
+
+            self.marked_image_pub.publish(  # Publiceer gemarkeerde preview
+                self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+            )
+
+            return  # Stop hier; geen YOLO-verwerking
 
         try:
             self.vision_processing_loop()  # Voer live preview loop uit
