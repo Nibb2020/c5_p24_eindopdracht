@@ -6,107 +6,146 @@ import time
 import cv2
 from PIL import Image, ImageTk
 
-# --- ROS2 INTERFACES IMPORTS CONFORM JOUW TABEL ---
-try:
-    from std_msgs.msg import Bool, String
-    from project_interfaces.srv import Empty
-except ImportError:
-    # Veilige fallback/mock klassen voor lokaal testen zonder ROS2-omgeving
-    class Bool:
-        def __init__(self): self.data = False
-    class String:
-        def __init__(self): self.data = ""
-    class Empty:
-        class Request:
-            pass
+# --- ROS2 IMPORTS ---
+import rclpy
+from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rcl_interfaces.srv import SetParameters # Nodig om parameters op een andere node te zetten
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Empty
 
 
-class HumanInterface:
-    def __init__(self, root, callbacks):
-        self.root, self.callbacks = root, callbacks
-        self.root.geometry("1000x570")
+class HumanInterface(Node):
+    def __init__(self, root):
+        # Initialiseer de ROS2 Node
+        super().__init__("hmi_node")
+
+        self.root = root
+
+        self.root.geometry("1000x530")
         self.root.title("HMI Interface - OpenCV Video Display")
         self.root.resizable(False, False)
 
-        # Statusvariabelen conform jouw originele logica
+        # ================= STATE =================
         self.ui_start_stop_active = self.ui_reset_pressed = self.ui_training_inference_active = False
-        self.snelheid_laatste = 5
-        self.versnelling_laatste = 2
+        
+        # Interne MoveGroup parameters (als float tussen 0.05 en 0.50 vanwege de 50% limiet)
+        self.snelheid_laatste = 0.30  # Standaard 30%
+        self.versnelling_laatste = 0.20  # Standaard 20%
+        
+        self.robot_status = "UNKNOWN"
+        self.is_countdown_active = False  # Houdt bij of er een timer loopt
 
-        # --- HOOFD-LAYOUT FRAMES ---
+        # ================= ROS2 CONFIGURATIE =================
+        self.pub_start_stop = self.create_publisher(Bool, "/ui_start_stop", 10)
+        self.sub_robot_status = self.create_subscription(
+            String,
+            "/ui_robot_status",
+            self.robot_status_callback,
+            10
+        )
+
+        self.cli_reset = self.create_client(Empty, "/ui_reset")
+        self.cli_retry = self.create_client(Empty, "/ui_retry")
+        self.cli_training = self.create_client(Empty, "/ui_training_inference")
+
+        # --- REMOTE PARAMETER CLIENT CONFIGURATIE ---
+        # Vul hier de exacte node-naam in van de node die jouw MovegroupHelper aanmaakt!
+        self.andere_node_naam = "manipulator_control" 
+        
+        self.cli_remote_param = self.create_client(
+            SetParameters, 
+            f"/{self.andere_node_naam}/set_parameters"
+        )
+
+        # =====================================================
+        # ==================== UI LAYOUT ======================
+        # =====================================================
+
         self.left_panel = tk.Frame(self.root)
         self.left_panel.pack(side=tk.LEFT, padx=15, pady=10, fill=tk.Y)
 
         self.right_panel = tk.Frame(self.root)
         self.right_panel.pack(side=tk.RIGHT, padx=15, pady=10, fill=tk.BOTH, expand=True)
 
-        # =========================================================================
-        # LINKS: VIDEOBEELDEN (Jouw OpenCV Cam & RViz / Marked Foto)
-        # =========================================================================
-        # 1. Video DepthAI / Camera
         self.frame_left = tk.Frame(self.left_panel, bg="black", width=320, height=240)
         self.frame_left.pack(pady=(0, 10))
-        self.frame_left.pack_propagate(False) 
+        self.frame_left.pack_propagate(False)
 
         self.camera_label = tk.Label(self.frame_left, bg="black")
         self.camera_label.pack(fill="both", expand=True)
 
-        # 2. Video Stream / Gemarkeerde foto (/marked_foto)
-        self.frame_right = tk.Frame(self.left_panel, bg="green", width=320, height=240) 
+        self.frame_right = tk.Frame(self.left_panel, bg="green", width=320, height=240)
         self.frame_right.pack()
         self.frame_right.pack_propagate(False)
 
         self.rviz_label = tk.Label(self.frame_right, bg="black")
         self.rviz_label.pack(fill="both", expand=True)
 
-        # =========================================================================
-        # RECHTS BOVEN: KNOPPEN 
-        # =========================================================================
         self.buttons_frame = tk.Frame(self.right_panel)
         self.buttons_frame.pack(fill=tk.X, pady=(0, 15))
 
-        # Trainingknop -> Gekoppeld aan /ui_training_inference (Service Client)
-        self.training = tk.Button(self.buttons_frame, text="TRAINING", width=14, height=2, bg="blue", fg="white", command=self.toggle_ui_training_inference)
+        self.training = tk.Button(
+            self.buttons_frame,
+            text="TRAINING",
+            width=14,
+            height=2,
+            bg="blue",
+            fg="white",
+            command=self.toggle_ui_training_inference
+        )
         self.training.pack(side=tk.LEFT, padx=5)
 
-        # Wisselende actie-knoppen container
         self.action_button_container = tk.Frame(self.buttons_frame)
         self.action_button_container.pack(side=tk.LEFT, padx=5)
 
-        # Start/Stop Knoppen -> Gekoppeld aan /ui_start_stop (Publisher)
         self.turn_on = tk.Button(self.action_button_container, text="ON", width=10, height=2, command=self.toggle_turn_on)
         self.turn_off = tk.Button(self.action_button_container, text="OFF", width=10, height=2, command=self.toggle_turn_off)
-        
-        # Reset Knop -> Gekoppeld aan /ui_reset (Service Client)
         self.reset = tk.Button(self.action_button_container, text="RESET", width=10, height=2, command=self.toggle_ui_reset, activebackground="yellow")
-        
-        # Retry Knop -> Gekoppeld aan /ui_retry (Service Client)
         self.retry = tk.Button(self.action_button_container, text="RETRY", width=10, height=2, bg="lightgray", command=self.trigger_ui_retry)
 
-        # =========================================================================
-        # RECHTS MIDDEN: SLIDERS (Interne parameters, behouden conform jouw code)
-        # =========================================================================
+        # Eénmalige stabiele initiële opbouw van de knoppen
+        self.turn_on.pack(side=tk.LEFT, padx=(0, 5))
+        self.turn_off.pack(side=tk.LEFT, padx=(0, 5))
+        self.reset.pack(side=tk.LEFT, padx=(0, 5))
+        self.retry.pack(side=tk.LEFT)
+
         self.sliders_frame = tk.Frame(self.right_panel)
         self.sliders_frame.pack(fill=tk.X, pady=(0, 15))
 
-        self.slider_snelheid = tk.Scale(self.sliders_frame, from_=0, to=10, orient=tk.HORIZONTAL, tickinterval=2, label=f"Snelheid (Laatste: {self.snelheid_laatste})", length=240)
+        # Snelheid Slider (Visueel in %: 5 tot 100)
+        self.slider_snelheid = tk.Scale(
+            self.sliders_frame,
+            from_=5, to=100,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            label=f"Snelheid (Laatste: {int(self.snelheid_laatste * 100)}%)",
+            length=240
+        )
         self.slider_snelheid.bind("<ButtonRelease-1>", self.update_snelheid)
         self.slider_snelheid.pack(side=tk.LEFT, padx=(5, 20))
-        
-        self.slider_versnelling = tk.Scale(self.sliders_frame, from_=0, to=10, orient=tk.HORIZONTAL, tickinterval=2, label=f"Versnelling (Laatste: {self.versnelling_laatste})", length=240)
-        self.slider_versnelling.bind("<ButtonRelease-1>", self.update_versnelling)
 
-        # =========================================================================
-        # RECHTS ONDER: TERMINAL LOGGING (Toont live updates van /ui_robot_status)
-        # =========================================================================
+        # Versnelling Slider (Visueel in %: 5 tot 100)
+        self.slider_versnelling = tk.Scale(
+            self.sliders_frame,
+            from_=5, to=100,
+            resolution=1,
+            orient=tk.HORIZONTAL,
+            label=f"Versnelling (Laatste: {int(self.versnelling_laatste * 100)}%)",
+            length=240
+        )
+        self.slider_versnelling.bind("<ButtonRelease-1>", self.update_versnelling)
+        self.slider_versnelling.pack(side=tk.LEFT, padx=5)
+
         self.log_frame = tk.Frame(self.right_panel)
         self.log_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.log = tk.Text(self.log_frame, height=9, state="disabled", bg="black", fg="white", insertbackground="white")  
+        self.log = tk.Text(self.log_frame, height=7, state="disabled",
+                           bg="black", fg="white", insertbackground="white")
         self.log.pack(fill=tk.BOTH, expand=True)
 
-        # --- HARDWARE INITIALISATIE (OpenCV) ---
-        self.cap_rviz = cv2.VideoCapture("http://localhost:8080/stream?topic=/rviz/camera_image") 
+        # OpenCV Initialisatie
+        self.cap_rviz = cv2.VideoCapture("http://localhost:8080/stream?topic=/rviz/camera_image")
         self.cap_rviz.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
         self.cap_rviz.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
@@ -114,12 +153,310 @@ class HumanInterface:
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
 
-        # Start loops
         self._video_loop()
         self.toggle_turn_off()
 
+    # =====================================================
+    # INKOMENDE COMMUNICATIE (Subscribers)
+    # =====================================================
+
+    def robot_status_callback(self, msg: String):
+        self.robot_status = msg.data
+        self.root.after(0, lambda: self.update_ui_log(f"[ROBOT STATUS] {msg.data}"))
+
+    # =====================================================
+    # UITGAANDE COMMUNICATIE (Publishers & Services)
+    # =====================================================
+
+    def publiceer_start_stop(self, status: bool):
+        msg = Bool()
+        msg.data = status
+        self.pub_start_stop.publish(msg)
+        self.get_logger().info(f"Gepubliceerd naar /ui_start_stop: {status}")
+
+    def call_service_async(self, client, done_callback):
+        if not client.wait_for_service(timeout_sec=1.0):
+            self.root.after(0, lambda: self.update_ui_log("[ROS2 FOUT] Service niet bereikbaar!"))
+            return False
+        
+        req = Empty.Request()
+        future = client.call_async(req)
+        future.add_done_callback(done_callback)
+        return True
+
+    def _verstuur_remote_parameter(self, param_naam, param_waarde):
+        """ Stuur asynchroon een parameter update naar de andere node """
+        if not self.cli_remote_param.wait_for_service(timeout_sec=1.0):
+            self.root.after(0, lambda: self.update_ui_log(f"[ROS2 FOUT] Kan parameters op node '{self.andere_node_naam}' niet aanpassen!"))
+            return
+
+        p = Parameter(param_naam, Parameter.Type.DOUBLE, param_waarde)
+        
+        req = SetParameters.Request()
+        req.parameters = [p.to_parameter_msg()]
+        
+        future = self.cli_remote_param.call_async(req)
+        future.add_done_callback(lambda f: self._handle_remote_param_response(f, param_naam, param_waarde))
+
+    def _handle_remote_param_response(self, future, naam, waarde):
+        try:
+            res = future.result()
+            if res and res.results[0].successful:
+                self.get_logger().info(f"Parameter '{naam}' succesvol aangepast op {self.andere_node_naam} naar {waarde:.2f}")
+            else:
+                reason = res.results[0].reason if res else "Onbekend"
+                self.root.after(0, lambda: self.update_ui_log(f"[ROS2 WAARSCHUWING] Node weigerde parameter: {reason}"))
+        except Exception as e:
+            self.get_logger().error(f"Remote parameter call mislukt: {e}")
+
+    # =====================================================
+    # BUTTON INTERACTIES & VISUELE COUNTDOWN LOGICA
+    # =====================================================
+
+    def _start_countdown_timer(self, resterende_tijd, target_knop, originele_tekst, callback_functie):
+        if resterende_tijd > 0:
+            self.is_countdown_active = True
+            target_knop.config(text=f"{originele_tekst} ({resterende_tijd}s)")
+            self.root.after(1000, lambda: self._start_countdown_timer(resterende_tijd - 1, target_knop, originele_tekst, callback_functie))
+        else:
+            self.is_countdown_active = False
+            target_knop.config(text=originele_tekst)
+            callback_functie()
+
+    def toggle_turn_on(self):
+        if self.is_countdown_active: return
+        self.ui_start_stop_active, self.ui_reset_pressed = True, False
+        self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {int(self.snelheid_laatste * 100)}%)")
+        self.slider_snelheid.set(int(self.snelheid_laatste * 100))
+        self.turn_on.config(bg="green", activebackground="lightgreen")
+        self.turn_off.config(bg="lightgray")
+        self.reset.config(bg="lightgray")
+        
+        self.update_ui_log(f"[HMI] Systeem aangezet (ON). Snelheid scaling: {int(self.snelheid_laatste * 100)}%")
+        self.publiceer_start_stop(True)
+
+    def toggle_turn_off(self):
+        if self.is_countdown_active: return
+        self._sla_huidige_snelheid_op()
+        self.ui_start_stop_active = self.ui_reset_pressed = self.ui_training_inference_active = False
+
+        self._wissel_ui_modus(naar_training=False)
+
+        self.slider_snelheid.set(5) 
+        self.slider_snelheid.config(state="disabled", label=f"Snelheid (Laatste: {int(self.snelheid_laatste * 100)}%)")
+        self.slider_versnelling.config(state="disabled", label=f"Versnelling (Laatste: {int(self.versnelling_laatste * 100)}%)")
+
+        self.turn_on.config(state="normal", bg="lightgray")
+        self.turn_off.config(state="normal", bg="red", activebackground="pink")
+        self.reset.config(bg="lightgray")
+        self.training.config(bg="blue", fg="white", state="normal")
+
+        self.update_ui_log("[HMI] Systeem uitgezet (OFF).")
+        self.publiceer_start_stop(False)
+
+    def toggle_ui_training_inference(self):
+        if self.is_countdown_active: return
+        self.ui_training_inference_active = not self.ui_training_inference_active
+        self.ui_start_stop_active = self.ui_reset_pressed = False
+
+        if self.ui_training_inference_active:
+            self._wissel_ui_modus(naar_training=True)
+            self.training.config(bg="blue", activebackground="purple")
+            self.reset.config(bg="orange")
+
+            self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {int(self.snelheid_laatste * 100)}%)")
+            self.slider_versnelling.config(state="normal", label=f"Versnelling (Actief: {int(self.versnelling_laatste * 100)}%)")
+            self.slider_versnelling.set(int(self.versnelling_laatste * 100))
+
+            self.update_ui_log("[HMI] Training Modus Actief.")
+        else:
+            # Sla de schaal op (omgerekend naar float)
+            self.versnelling_laatste = self.slider_versnelling.get() / 100.0
+            self.toggle_turn_off()
+
+        self.call_service_async(self.cli_training, self._handle_training_response)
+
+    def _handle_training_response(self, future):
+        try:
+            future.result()
+            self.get_logger().info("Training service succesvol afgehandeld.")
+        except Exception as e:
+            self.get_logger().error(f"Training service call mislukt: {e}")
+
+    def toggle_ui_reset(self):
+        if self.is_countdown_active: return
+        self._sla_huidige_snelheid_op()
+        was_in_training = self.ui_training_inference_active
+        self.ui_reset_pressed, self.ui_start_stop_active = True, False
+        
+        self.slider_snelheid.set(5)
+        self._set_buttons_state("disabled")
+        self.reset.config(bg="yellow")
+        
+        self.update_ui_log("[HMI] Reset aangevraagd. Interface geblokkeerd voor 3s...")
+
+        self._start_countdown_timer(
+            resterende_tijd=3, 
+            target_knop=self.reset, 
+            originele_tekst="RESET", 
+            callback_functie=lambda: self._verstuur_reset_service(was_in_training)
+        )
+
+    def _verstuur_reset_service(self, was_in_training):
+        success = self.call_service_async(self.cli_reset, lambda f: self._handle_reset_response(f, was_in_training))
+        if not success:
+            self._herstel_na_reset(was_in_training)
+
+    def _handle_reset_response(self, future, was_in_training):
+        try:
+            future.result()
+            self.root.after(0, lambda: self._herstel_na_reset(was_in_training))
+        except Exception as e:
+            self.get_logger().error(f"Reset service call mislukt: {e}")
+            self.root.after(0, lambda: self._herstel_na_reset(was_in_training))
+
+    def trigger_ui_retry(self):
+        if self.is_countdown_active: return
+        self.update_ui_log("[HMI] Retry ingedrukt. Interface geblokkeerd voor 3s...")
+        
+        self._set_buttons_state("disabled")
+        self.retry.config(bg="orange")
+        
+        self._start_countdown_timer(
+            resterende_tijd=3,
+            target_knop=self.retry,
+            originele_tekst="RETRY",
+            callback_functie=self._verstuur_retry_service
+        )
+
+    def _verstuur_retry_service(self):
+        success = self.call_service_async(self.cli_retry, self._handle_retry_response)
+        if not success:
+            self._deblokkeer_na_retry()
+
+    def _handle_retry_response(self, future):
+        try:
+            future.result()
+            self.root.after(0, self._deblokkeer_na_retry)
+        except Exception as e:
+            self.get_logger().error(f"Retry service call mislukt: {e}")
+            self.root.after(0, self._deblokkeer_na_retry)
+
+    def _deblokkeer_na_retry(self):
+        self._set_buttons_state("normal")
+        self.retry.config(bg="lightgray")
+        self.reset.config(bg="orange" if self.ui_training_inference_active else "lightgray")
+        self.training.config(bg="blue", fg="white")
+        
+        self.slider_snelheid.config(label=f"Snelheid (Actief: {int(self.snelheid_laatste * 100)}%)")
+        self.slider_versnelling.config(label=f"Versnelling (Actief: {int(self.versnelling_laatste * 100)}%)")
+        
+        self._wissel_ui_modus(naar_training=True)
+        self.update_ui_log("[HMI] Sorteercyclus voltooid. Interface weer beschikbaar.")
+
+    # =====================================================
+    # SLIDERS LOGICA (Stuurt parameters naar REMOTE node)
+    # =====================================================
+
+    def update_snelheid(self, event):
+        if self.is_countdown_active or not (self.ui_start_stop_active or self.ui_training_inference_active): return
+        val_percentage = int(self.slider_snelheid.get())
+        
+        # BEGRENZING: Mag niet sneller dan 50%
+        if val_percentage > 50:
+            val_percentage = 50
+            self.slider_snelheid.set(50) # Forceer slider terug naar 50%
+            self.update_ui_log("[HMI WAARSCHUWING] Snelheid begrensd op maximaal 50%!")
+
+        val_float = val_percentage / 100.0
+        if val_float > 0.05: self.snelheid_laatste = val_float
+
+        self.slider_snelheid.config(label=f"Snelheid (Actief: {val_percentage}%)")
+        self.update_ui_log(f"[HMI] Snelheid scaling ingesteld op: {val_percentage}%")
+
+        # Stuur de float-waarde (max 0.50) live naar de manipulator
+        self._verstuur_remote_parameter("velocity_scaling", val_float)
+
+    def update_versnelling(self, event):
+        if self.is_countdown_active or not self.ui_training_inference_active: return
+        val_percentage = int(self.slider_versnelling.get())
+        
+        # BEGRENZING: Mag niet sneller dan 50%
+        if val_percentage > 50:
+            val_percentage = 50
+            self.slider_versnelling.set(50) # Forceer slider terug naar 50%
+            self.update_ui_log("[HMI WAARSCHUWING] Versnelling begrensd op maximaal 50%!")
+
+        val_float = val_percentage / 100.0
+        self.versnelling_laatste = val_float
+
+        self.slider_versnelling.config(label=f"Versnelling (Actief: {val_percentage}%)")
+        self.update_ui_log(f"[HMI] Versnelling scaling ingesteld op: {val_percentage}%")
+
+        # Stuur de float-waarde (max 0.50) live naar de manipulator
+        self._verstuur_remote_parameter("acceleration_scaling", val_float)
+
+    def _set_buttons_state(self, state):
+        self.turn_on.config(state=state)
+        self.turn_off.config(state=state)
+        self.reset.config(state=state)
+        self.retry.config(state=state)
+        self.training.config(state=state)
+        self.slider_snelheid.config(state=state)
+        self.slider_versnelling.config(state=state)
+
+    def _herstel_na_reset(self, was_in_training):
+        self.ui_reset_pressed = False
+        self._set_buttons_state("normal")
+        
+        if was_in_training:
+            self.ui_training_inference_active = True
+            self._wissel_ui_modus(naar_training=True)
+            self.reset.config(bg="orange")
+            self.slider_snelheid.config(label=f"Snelheid (Actief: {int(self.snelheid_laatste * 100)}%)")
+            self.slider_versnelling.config(label=f"Versnelling (Actief: {int(self.versnelling_laatste * 100)}%)")
+            self.slider_versnelling.set(int(self.versnelling_laatste * 100))
+            self.update_ui_log("[HMI] Reset voltooid. Training herstart. Interface weer beschikbaar.")
+        else:
+            self.ui_training_inference_active = False
+            self._wissel_ui_modus(naar_training=False)
+            self.slider_snelheid.set(5)
+            self.slider_snelheid.config(state="disabled", label=f"Snelheid (Laatste: {int(self.snelheid_laatste * 100)}%)")
+            self.slider_versnelling.config(state="disabled", label=f"Versnelling (Laatste: {int(self.versnelling_laatste * 100)}%)")
+            self.turn_on.config(bg="lightgray")
+            self.turn_off.config(bg="red", activebackground="pink")
+            self.reset.config(bg="lightgray")
+            self.update_ui_log("[HMI] Reset voltooid. Systeem staat in veilige OFF-state. Interface weer beschikbaar.")
+
+    def update_ui_log(self, msg):
+        self.log.config(state="normal")
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+        self.log.config(state="disabled")
+
+    def _sla_huidige_snelheid_op(self):
+        if self.ui_start_stop_active and self.slider_snelheid.get() > 5:
+            self.snelheid_laatste = self.slider_snelheid.get() / 100.0
+
+    def _wissel_ui_modus(self, naar_training=False):
+        if naar_training:
+            self.turn_on.pack_forget()
+            self.turn_off.pack_forget()
+            
+            self.reset.pack(side=tk.LEFT, padx=(0, 5))
+            self.retry.pack(side=tk.LEFT)
+            self.slider_versnelling.pack(side=tk.LEFT, padx=5)
+        else:
+            self.retry.pack_forget()
+            self.slider_versnelling.pack_forget()
+            
+            self.turn_on.pack(side=tk.LEFT, padx=(0, 5))
+            self.turn_off.pack(side=tk.LEFT, padx=(0, 5))
+            self.reset.pack(side=tk.LEFT, padx=(0, 5))
+            
+        self.root.update_idletasks()
+
     def _video_loop(self):
-        """ OpenCV stream verwerking """
         if self.cap.isOpened():
             ret, frame = self.cap.read()
             if ret:
@@ -145,213 +482,21 @@ class HumanInterface:
     def close_hardware(self):
         if hasattr(self, 'cap') and self.cap.isOpened():
             self.cap.release()
-            print("[HMI] OpenCV Camera succesvol afgesloten.")
-
-    def update_ui_log(self, bericht):
-        """
-        Wordt extern aangeroepen door de Subscriber van '/ui_robot_status'.
-        Toont de actuele status van de controller live in de GUI-terminal.
-        """
-        self.root.after(0, lambda: [
-            self.log.config(state="normal"), 
-            self.log.insert("end", bericht + "\n"), 
-            self.log.see("end"), 
-            self.log.config(state="disabled")
-        ])
-
-    def _sla_huidige_snelheid_op(self):
-        if self.ui_start_stop_active and self.slider_snelheid.get() > 0: self.snelheid_laatste = self.slider_snelheid.get()
-
-    def _wissel_ui_modus(self, naar_training=False):
-        if naar_training:
-            self.turn_on.pack_forget()
-            self.turn_off.pack_forget()
-            self.reset.pack(side=tk.LEFT, padx=(0, 5))
-            self.retry.pack(side=tk.LEFT)
-            self.slider_versnelling.pack(side=tk.LEFT, padx=5)
-            self.slider_versnelling.config(state="normal")
-        else:
-            self.retry.pack_forget()
-            self.reset.pack_forget()
-            self.slider_versnelling.pack_forget()
-            self.turn_on.pack(side=tk.LEFT, padx=(0, 5))
-            self.turn_off.pack(side=tk.LEFT, padx=(0, 5))
-            self.reset.pack(side=tk.LEFT)
-
-    # =========================================================================
-    # EXACTE INTERFACE TRIGGERS CONFORM JOUW TABEL
-    # =========================================================================
-
-    def toggle_turn_on(self):
-        """ TOPIC PUBLISHER: Stuurt True via std_msgs/Bool naar /ui_start_stop """
-        self.ui_start_stop_active, self.ui_reset_pressed = True, False
-        self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {self.snelheid_laatste})")  
-        self.slider_snelheid.set(self.snelheid_laatste)
-        self.turn_on.config(bg="green", activebackground="lightgreen"); self.turn_off.config(bg="lightgray")
-        if self.reset['state'] == 'normal': self.reset.config(bg="lightgray")
-        
-        self.update_ui_log("[HMI -> Publisher] Systeem START -> /ui_start_stop: True")
-        
-        msg = Bool()
-        msg.data = True
-        if 'ui_start_stop' in self.callbacks: 
-            self.callbacks['ui_start_stop'](msg)
-
-    def toggle_turn_off(self):
-        """ TOPIC PUBLISHER: Stuurt False via std_msgs/Bool naar /ui_start_stop """
-        self._sla_huidige_snelheid_op()
-        self.ui_start_stop_active = self.ui_reset_pressed = self.ui_training_inference_active = False
-        self._wissel_ui_modus(naar_training=False)
-        self.slider_snelheid.set(0)
-        self.slider_snelheid.config(state="disabled", label=f"Snelheid (Laatste: {self.snelheid_laatste})")  
-        self.slider_versnelling.config(state="disabled", label=f"Versnelling (Laatste: {self.versnelling_laatste})")
-        self.turn_on.config(state="normal", bg="lightgray")
-        self.turn_off.config(state="normal", bg="red", activebackground="pink")
-        if self.reset['state'] == 'normal': self.reset.config(bg="lightgray")
-        self.training.config(bg="blue", fg="white", state="normal")
-        
-        self.update_ui_log("[HMI -> Publisher] Systeem STOP -> /ui_start_stop: False")
-        
-        msg = Bool()
-        msg.data = False
-        if 'ui_start_stop' in self.callbacks: 
-            self.callbacks['ui_start_stop'](msg)
-
-    def toggle_ui_reset(self):
-        """ SERVICE CLIENT: Stuurt een Empty Request naar de Server op /ui_reset """
-        self._sla_huidige_snelheid_op()
-        was_in_training = self.ui_training_inference_active
-        self.ui_reset_pressed, self.ui_start_stop_active = True, False
-        
-        self._wissel_ui_modus(naar_training=was_in_training)
-        self.slider_snelheid.set(0)
-        
-        # Tijdelijke blokkade van de GUI-knoppen tijdens de service call
-        self.turn_on.config(state="disabled", bg="lightgray")
-        self.turn_off.config(state="disabled", bg="lightgray")
-        self.reset.config(state="disabled", bg="lightgray")
-        self.retry.config(state="disabled", bg="lightgray")
-        self.training.config(state="disabled")
-        self.slider_snelheid.config(state="disabled")
-        self.slider_versnelling.config(state="disabled")
-        self.root.update_idletasks() 
-
-        # Lokale GUI-timeout simulatie (de controller deblokkeert dit zodra de response er is)
-        self.root.after(4000, lambda: self._herstel_na_reset(was_in_training))
-        
-        self.update_ui_log("[HMI -> Service Client] Reset aangevraagd via /ui_reset...")
-        
-        req = Empty.Request()
-        if 'ui_reset' in self.callbacks: 
-            self.callbacks['ui_reset'](req)
-
-    def toggle_ui_training_inference(self):
-        """ SERVICE CLIENT: Stuurt een Empty Request naar de Server op /ui_training_inference """
-        self.ui_training_inference_active = not self.ui_training_inference_active
-        self.ui_start_stop_active = self.ui_reset_pressed = False
-        
-        if self.ui_training_inference_active:
-            self._wissel_ui_modus(naar_training=True)
-            self.training.config(bg="blue", activebackground="purple")
-            if self.reset['state'] == 'normal': self.reset.config(bg="orange")
-            self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {self.snelheid_laatste})") 
-            self.slider_versnelling.config(state="normal", label=f"Versnelling (Actief: {self.versnelling_laatste})"); self.slider_versnelling.set(self.versnelling_laatste)
-            
-            self.update_ui_log("[HMI -> Service Client] Training/Inference modus activeren via /ui_training_inference...")
-            req = Empty.Request()
-            if 'ui_training_inference' in self.callbacks: 
-                self.callbacks['ui_training_inference'](req)
-        else:
-            self.versnelling_laatste = self.slider_versnelling.get()
-            self.toggle_turn_off()
-            
-            self.update_ui_log("[HMI -> Service Client] Training/Inference modus deactiveren via /ui_training_inference...")
-            req = Empty.Request()
-            if 'ui_training_inference' in self.callbacks: 
-                self.callbacks['ui_training_inference'](req)
-
-    def trigger_ui_retry(self):
-        """ SERVICE CLIENT: Stuurt een Empty Request naar de Server op /ui_retry """
-        self.update_ui_log("[HMI -> Service Client] Enkele cyclus aangevraagd via /ui_retry...")
-        
-        self.retry.config(state="disabled", bg="lightgray")
-        self.reset.config(state="disabled", bg="lightgray")
-        self.training.config(state="disabled")
-        self.slider_snelheid.config(state="disabled")
-        self.slider_versnelling.config(state="disabled")
-        self.root.update_idletasks()
-
-        self.root.after(4000, lambda: [
-            self.retry.config(state="normal", bg="lightgray"),
-            self.reset.config(state="normal", bg="orange" if self.ui_training_inference_active else "lightgray"),
-            self.training.config(state="normal"),
-            self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {self.snelheid_laatste})"),
-            self.slider_versnelling.config(state="normal", label=f"Versnelling (Actief: {self.versnelling_laatste})") if self.ui_training_inference_active else None,
-            self.update_ui_log("[HMI] Enkele cyclus aanvraag verwerkt.")
-        ])
-        
-        req = Empty.Request()
-        if 'ui_retry' in self.callbacks: 
-            self.callbacks['ui_retry'](req)
-
-    def update_snelheid(self, event):
-        """ Interne HMI Parameter update """
-        if not (self.ui_start_stop_active or self.ui_training_inference_active): return
-        huidige_waarde = self.slider_snelheid.get()
-        if huidige_waarde > 0: self.snelheid_laatste = huidige_waarde
-        self.slider_snelheid.config(label=f"Snelheid (Actief: {self.snelheid_laatste})")
-        if 'snelheid' in self.callbacks: 
-            self.callbacks['snelheid'](int(huidige_waarde))
-
-    def update_versnelling(self, event):
-        """ Interne HMI Parameter update """
-        if not self.ui_training_inference_active: return 
-        huidige_waarde = self.slider_versnelling.get()
-        self.versnelling_laatste = huidige_waarde
-        self.slider_versnelling.config(label=f"Versnelling (Actief: {self.versnelling_laatste})")
-        if 'versnelling' in self.callbacks: 
-            self.callbacks['versnelling'](int(huidige_waarde))
-
-    def _herstel_na_reset(self, was_in_training):
-        self.ui_reset_pressed = False
-        self.training.config(state="normal")
-        self.retry.config(state="normal", bg="lightgray")
-        
-        if was_in_training:
-            self.ui_training_inference_active = True
-            self.reset.config(state="normal", bg="orange")
-            self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {self.snelheid_laatste})")
-            self.slider_versnelling.config(state="normal", label=f"Versnelling (Actief: {self.versnelling_laatste})")
-            self.slider_versnelling.set(self.versnelling_laatste)
-        else:
-            self.turn_on.config(state="normal", bg="lightgray")
-            self.turn_off.config(state="normal", bg="red", activebackground="pink")
-            self.reset.config(state="normal", bg="lightgray")
-            self.slider_snelheid.config(state="disabled", label=f"Snelheid (Laatste: {self.snelheid_laatste})")
-            self.slider_versnelling.config(state="disabled", label=f"Versnelling (Laatste: {self.versnelling_laatste})")
+        if hasattr(self, 'cap_rviz') and self.cap_rviz.isOpened():
+            self.cap_rviz.release()
 
 
-# =========================================================================
-# RUN / TEST OMGEVING MET JOUW ECHTE INTERFACE-STRUCTUUR (MOCK CALLBACKS)
-# =========================================================================
-if __name__ == '__main__':
+# =====================================================
+# MAIN EXECUTION
+# =====================================================
+
+if __name__ == "__main__":
+    rclpy.init()
+
     root = tk.Tk()
-    
-    # De simulatie-callbacks bootsen exact na hoe jouw ROS2-node bestand (de brug)
-    # dadelijk de data ontvangt. 
-    simulatie_callbacks = {
-        'ui_start_stop': lambda msg: print(f"[MOCK-ROUTER] Ontvangen op /ui_start_stop -> msg.data: {msg.data}"),
-        'ui_reset': lambda req: print(f"[MOCK-ROUTER] Service Client /ui_reset aangeroepen met Empty Request"),
-        'ui_training_inference': lambda req: print(f"[MOCK-ROUTER] Service Client /ui_training_inference aangeroepen met Empty Request"),
-        'ui_retry': lambda req: print(f"[MOCK-ROUTER] Service Client /ui_retry aangeroepen met Empty Request"),
-        'snelheid': lambda val: print(f"[MOCK-ROUTER] Interne GUI snelheid gewijzigd naar: {val}"),
-        'versnelling': lambda val: print(f"[MOCK-ROUTER] Interne GUI versnelling gewijzigd naar: {val}")
-    }
-    
-    ui = HumanInterface(root, simulatie_callbacks)
-    
-    # Test-simulatie om te laten zien hoe de Subscriber op '/ui_robot_status' data in de UI logt:
-    root.after(2000, lambda: ui.update_ui_log("[MOCK SUBSCRIBER] /ui_robot_status: STATUS_STANDBY"))
-    
-    root.protocol("WM_DELETE_WINDOW", lambda: [ui.close_hardware(), root.destroy()])
+    ui = HumanInterface(root)
+
+    threading.Thread(target=rclpy.spin, args=(ui,), daemon=True).start()
+
+    root.protocol("WM_DELETE_WINDOW", lambda: [ui.close_hardware(), root.destroy(), rclpy.shutdown()])
     root.mainloop()
