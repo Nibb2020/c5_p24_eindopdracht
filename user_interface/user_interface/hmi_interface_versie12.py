@@ -12,7 +12,8 @@ from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rcl_interfaces.srv import SetParameters # Nodig om parameters op een andere node te zetten
 from std_msgs.msg import Bool, String
-from std_srvs.srv import Empty
+from std_srvs.srv import Trigger, SetBool
+
 
 
 class HumanInterface(Node):
@@ -36,22 +37,26 @@ class HumanInterface(Node):
         self.robot_status = "UNKNOWN"
         self.is_countdown_active = False  # Houdt bij of er een timer loopt
 
+        # ================= VARIABELEN =================
+        self.pending_reset = False
+        self.pending_retry = False
+
         # ================= ROS2 CONFIGURATIE =================
-        self.pub_start_stop = self.create_publisher(Bool, "/ui_start_stop", 10)
+        self.pub_start_stop = self.create_publisher(Bool, "/ui/start_stop", 10)
         self.sub_robot_status = self.create_subscription(
             String,
-            "/ui_robot_status",
+            "/controller/state",
             self.robot_status_callback,
             10
         )
 
-        self.cli_reset = self.create_client(Empty, "/ui_reset")
-        self.cli_retry = self.create_client(Empty, "/ui_retry")
-        self.cli_training = self.create_client(Empty, "/ui_training_inference")
+        self.cli_reset = self.create_client(Trigger, "/ui/reset_error")
+        self.cli_retry = self.create_client(Trigger, "/ui/retry")
+        self.cli_training = self.create_client(SetBool, "/ui/training_mode")
 
         # --- REMOTE PARAMETER CLIENT CONFIGURATIE ---
         # Vul hier de exacte node-naam in van de node die jouw MovegroupHelper aanmaakt!
-        self.andere_node_naam = "manipulator_control" 
+        self.andere_node_naam = "manipulatie" 
         
         self.cli_remote_param = self.create_client(
             SetParameters, 
@@ -162,7 +167,27 @@ class HumanInterface(Node):
 
     def robot_status_callback(self, msg: String):
         self.robot_status = msg.data
-        self.root.after(0, lambda: self.update_ui_log(f"[ROBOT STATUS] {msg.data}"))
+        state = msg.data.strip().casefold()
+
+        self.root.after(0,lambda: self.update_ui_log(f"[ROBOT STATUS] {msg.data}"))
+
+        if state == "stand-by":
+            if self.pending_reset:
+                self.pending_reset = False
+
+                self.root.after(0,lambda: self._herstel_na_reset(False))
+
+        elif state == "training/inference mode":
+            if self.pending_retry:
+                self.pending_retry = False
+
+                self.root.after(0,self._deblokkeer_na_retry)
+
+        elif state == "error":
+            if self.pending_retry:
+                self.pending_retry = False
+
+                self.root.after(0,self._deblokkeer_na_retry)
 
     # =====================================================
     # UITGAANDE COMMUNICATIE (Publishers & Services)
@@ -172,15 +197,41 @@ class HumanInterface(Node):
         msg = Bool()
         msg.data = status
         self.pub_start_stop.publish(msg)
-        self.get_logger().info(f"Gepubliceerd naar /ui_start_stop: {status}")
+        self.get_logger().info(f"Gepubliceerd naar /ui/start_stop: {status}")
 
-    def call_service_async(self, client, done_callback):
+    def call_trigger_service_async(self,client,done_callback,) -> bool:
         if not client.wait_for_service(timeout_sec=1.0):
-            self.root.after(0, lambda: self.update_ui_log("[ROS2 FOUT] Service niet bereikbaar!"))
+            self.root.after(
+                0,
+                lambda: self.update_ui_log(
+                    "[ROS2 FOUT] Service niet bereikbaar!"
+                ),
+            )
             return False
-        
-        req = Empty.Request()
-        future = client.call_async(req)
+
+        request = Trigger.Request()
+
+        future = client.call_async(request)
+        future.add_done_callback(done_callback)
+        return True
+
+
+    def call_training_service_async(self,enabled: bool,done_callback,) -> bool:
+        if not self.cli_training.wait_for_service(
+            timeout_sec=1.0
+        ):
+            self.root.after(
+                0,
+                lambda: self.update_ui_log(
+                    "[ROS2 FOUT] Training service niet bereikbaar!"
+                ),
+            )
+            return False
+
+        request = SetBool.Request()
+        request.data = enabled
+
+        future = self.cli_training.call_async(request)
         future.add_done_callback(done_callback)
         return True
 
@@ -274,17 +325,32 @@ class HumanInterface(Node):
             self.versnelling_laatste = self.slider_versnelling.get() / 100.0
             self.toggle_turn_off()
 
-        self.call_service_async(self.cli_training, self._handle_training_response)
+        success = self.call_training_service_async(self.ui_training_inference_active,self._handle_training_response)
+        if not success:
+            self.ui_training_inference_active = (not self.ui_training_inference_active)
 
     def _handle_training_response(self, future):
         try:
-            future.result()
-            self.get_logger().info("Training service succesvol afgehandeld.")
-        except Exception as e:
-            self.get_logger().error(f"Training service call mislukt: {e}")
+            response = future.result()
+
+            if not response.success:
+                message = (response.message or "Training mode geweigerd")
+
+                self.root.after(0,lambda: self.update_ui_log(f"[TRAINING FOUT] {message}"),)
+
+                self.ui_training_inference_active = (not self.ui_training_inference_active)
+
+                self.root.after(0,lambda: self._wissel_ui_modus(naar_training=(self.ui_training_inference_active)))
+                return
+
+            self.root.after(0,lambda: self.update_ui_log(f"[HMI] {response.message}"))
+
+        except Exception as exception:
+            self.get_logger().error(f"Training service call mislukt: {exception}")
 
     def toggle_ui_reset(self):
         if self.is_countdown_active: return
+        self.pending_reset = True
         self._sla_huidige_snelheid_op()
         was_in_training = self.ui_training_inference_active
         self.ui_reset_pressed, self.ui_start_stop_active = True, False
@@ -303,20 +369,40 @@ class HumanInterface(Node):
         )
 
     def _verstuur_reset_service(self, was_in_training):
-        success = self.call_service_async(self.cli_reset, lambda f: self._handle_reset_response(f, was_in_training))
+        success = self.call_trigger_service_async(self.cli_reset,lambda future: self._handle_reset_response(future,was_in_training,))
         if not success:
+            self.pending_reset = False
             self._herstel_na_reset(was_in_training)
 
-    def _handle_reset_response(self, future, was_in_training):
+    def _handle_reset_response(self,future,was_in_training,):
         try:
-            future.result()
-            self.root.after(0, lambda: self._herstel_na_reset(was_in_training))
-        except Exception as e:
-            self.get_logger().error(f"Reset service call mislukt: {e}")
-            self.root.after(0, lambda: self._herstel_na_reset(was_in_training))
+            response = future.result()
+
+            if not response.success:
+                self.pending_reset = False
+                self.root.after(0,lambda: self.update_ui_log(f"[RESET FOUT] {response.message}"))
+
+                self.root.after(0,lambda: self._herstel_na_reset(was_in_training))
+                return
+
+            self.root.after(0,lambda: self.update_ui_log("[HMI] Reset geaccepteerd. ""Wachten tot de controller stand-by meldt."))
+
+        except Exception as exception:
+            self.pending_reset = False
+            self.get_logger().error(
+                f"Reset service call mislukt: {exception}"
+            )
+
+            self.root.after(
+                0,
+                lambda: self._herstel_na_reset(
+                    was_in_training
+                ),
+            )
 
     def trigger_ui_retry(self):
         if self.is_countdown_active: return
+        self.pending_retry = True
         self.update_ui_log("[HMI] Retry ingedrukt. Interface geblokkeerd voor 3s...")
         
         self._set_buttons_state("disabled")
@@ -330,20 +416,42 @@ class HumanInterface(Node):
         )
 
     def _verstuur_retry_service(self):
-        success = self.call_service_async(self.cli_retry, self._handle_retry_response)
+        success = self.call_trigger_service_async(self.cli_retry,self._handle_retry_response)
         if not success:
+            self.pending_retry = False
             self._deblokkeer_na_retry()
 
     def _handle_retry_response(self, future):
         try:
-            future.result()
-            self.root.after(0, self._deblokkeer_na_retry)
-        except Exception as e:
-            self.get_logger().error(f"Retry service call mislukt: {e}")
-            self.root.after(0, self._deblokkeer_na_retry)
+            response = future.result()
+
+            if not response.success:
+                self.pending_retry = False
+                self.root.after(0,lambda: self.update_ui_log(f"[RETRY FOUT] {response.message}"))
+
+                self.root.after(0,self._deblokkeer_na_retry,)
+                return
+
+            self.root.after(
+                0,
+                lambda: self.update_ui_log(
+                    "[HMI] Retry geaccepteerd. "
+                    "Eén sorteercyclus wordt uitgevoerd."
+                ),
+            )
+
+        except Exception as exception:
+            self.pending_retry = False
+            self.get_logger().error(f"Retry service call mislukt: {exception}")
+
+            self.root.after(0,self._deblokkeer_na_retry)
 
     def _deblokkeer_na_retry(self):
+        self.pending_retry = False
         self._set_buttons_state("normal")
+        self.ui_start_stop_active = False
+        self.ui_training_inference_active = True
+
         self.retry.config(bg="lightgray")
         self.reset.config(bg="orange" if self.ui_training_inference_active else "lightgray")
         self.training.config(bg="blue", fg="white")
@@ -405,28 +513,31 @@ class HumanInterface(Node):
         self.slider_snelheid.config(state=state)
         self.slider_versnelling.config(state=state)
 
-    def _herstel_na_reset(self, was_in_training):
+    def _herstel_na_reset(self, was_in_training=False):
+        del was_in_training
+
+        self.pending_reset = False
         self.ui_reset_pressed = False
+        self.ui_start_stop_active = False
+        self.ui_training_inference_active = False
+
         self._set_buttons_state("normal")
-        
-        if was_in_training:
-            self.ui_training_inference_active = True
-            self._wissel_ui_modus(naar_training=True)
-            self.reset.config(bg="orange")
-            self.slider_snelheid.config(label=f"Snelheid (Actief: {int(self.snelheid_laatste * 100)}%)")
-            self.slider_versnelling.config(label=f"Versnelling (Actief: {int(self.versnelling_laatste * 100)}%)")
-            self.slider_versnelling.set(int(self.versnelling_laatste * 100))
-            self.update_ui_log("[HMI] Reset voltooid. Training herstart. Interface weer beschikbaar.")
-        else:
-            self.ui_training_inference_active = False
-            self._wissel_ui_modus(naar_training=False)
-            self.slider_snelheid.set(5)
-            self.slider_snelheid.config(state="disabled", label=f"Snelheid (Laatste: {int(self.snelheid_laatste * 100)}%)")
-            self.slider_versnelling.config(state="disabled", label=f"Versnelling (Laatste: {int(self.versnelling_laatste * 100)}%)")
-            self.turn_on.config(bg="lightgray")
-            self.turn_off.config(bg="red", activebackground="pink")
-            self.reset.config(bg="lightgray")
-            self.update_ui_log("[HMI] Reset voltooid. Systeem staat in veilige OFF-state. Interface weer beschikbaar.")
+        self._wissel_ui_modus(naar_training=False)
+
+        self.slider_snelheid.set(5)
+        self.slider_snelheid.config(state="disabled",label=("Snelheid "f"(Laatste: {int(self.snelheid_laatste * 100)}%)"))
+
+        self.slider_versnelling.config(state="disabled",label=("Versnelling "f"(Laatste: {int(self.versnelling_laatste * 100)}%)"))
+
+        self.turn_on.config(bg="lightgray")
+        self.turn_off.config(bg="red",activebackground="pink")
+        self.reset.config(bg="lightgray")
+        self.training.config(bg="blue",fg="white",state="normal")
+
+        self.update_ui_log(
+            "[HMI] Reset voltooid. "
+            "Controller staat stand-by."
+        )
 
     def update_ui_log(self, msg):
         self.log.config(state="normal")
@@ -490,13 +601,38 @@ class HumanInterface(Node):
 # MAIN EXECUTION
 # =====================================================
 
-if __name__ == "__main__":
-    rclpy.init()
+def main(args=None):
+    rclpy.init(args=args)
 
     root = tk.Tk()
     ui = HumanInterface(root)
 
-    threading.Thread(target=rclpy.spin, args=(ui,), daemon=True).start()
+    ros_thread = threading.Thread(
+        target=rclpy.spin,
+        args=(ui,),
+        daemon=True,
+    )
+    ros_thread.start()
 
-    root.protocol("WM_DELETE_WINDOW", lambda: [ui.close_hardware(), root.destroy(), rclpy.shutdown()])
-    root.mainloop()
+    def close_application():
+        ui.close_hardware()
+
+        if rclpy.ok():
+            rclpy.shutdown()
+
+        ui.destroy_node()
+        root.destroy()
+
+    root.protocol(
+        "WM_DELETE_WINDOW",
+        close_application,
+    )
+
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        close_application()
+
+
+if __name__ == "__main__":
+    main()

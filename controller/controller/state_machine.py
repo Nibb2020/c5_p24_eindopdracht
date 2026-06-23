@@ -112,7 +112,7 @@ class RobotController(Node):
 
         self.start_subscription = self.create_subscription(
             Bool,
-            "/ui/start",
+            "/ui/start_stop",
             self.start_callback,
             10,
             callback_group=self.callback_group,
@@ -161,28 +161,28 @@ class RobotController(Node):
 
         self.reset_service = self.create_service(
             Trigger,
-            "/controller/reset_error",
+            "/ui/reset_error",
             self.reset_error_callback,
             callback_group=self.callback_group,
         )
 
         self.move_home_service = self.create_service(
             Trigger,
-            "/controller/move_home",
+            "/ui/move_home",
             self.move_home_ui_callback,
             callback_group=self.callback_group,
         )
 
         self.training_service = self.create_service(
             SetBool,
-            "/controller/training_mode",
+            "/ui/training_mode",
             self.training_mode_callback,
             callback_group=self.callback_group,
         )
 
         self.retry_service = self.create_service(
             Trigger,
-            "/controller/retry",
+            "/ui/retry",
             self.retry_callback,
             callback_group=self.callback_group,
         )
@@ -437,6 +437,7 @@ class RobotController(Node):
             return response
 
         self.run_enabled = False
+        self.run_once = False
         self.move_home_requested = True
 
         self.change_state(State.MOVING_HOME)
@@ -551,7 +552,7 @@ class RobotController(Node):
                 self.enter_error(status)
 
             return
-            
+
         if status_lower == "klaar":
             if self.current_state == State.RUN_MANIPULATOR:
                 self.get_logger().info(
@@ -562,8 +563,14 @@ class RobotController(Node):
                     self.get_logger().info(
                         "One-cycle retry completed"
                     )
+
                     self.run_once = False
                     self.run_enabled = False
+
+                    self.change_state(
+                        State.TRAINING_INFERENCE
+                    )
+                    return
 
                 self.change_state(State.STANDBY)
                 return
@@ -613,11 +620,11 @@ class RobotController(Node):
     def retry_callback(self,request: Trigger.Request,response: Trigger.Response,) -> Trigger.Response:
         del request
 
-        if self.current_state != State.STANDBY:
+        if self.current_state != State.TRAINING_INFERENCE:
             response.success = False
             response.message = (
                 "Retry is only allowed while the controller "
-                "is in stand-by"
+                "is in training/inference mode"
             )
             return response
 
