@@ -134,12 +134,17 @@ class manipulatorController(Node):
 
             if self.home_is_requested():
                 self.publish_status("Sequence onderbroken, robot gaat naar up positie")
+
                 self.move_to_home()
+
+                self.publish_status("Home_klaar")
             else:
                 self.publish_status("Klaar")
 
-        except Exception as e:
-            self.publish_status(f"Fout: {str(e)}")
+        except Exception as exception:
+            self.publish_status(
+                f"Fout: {str(exception)}"
+            )
 
         finally:
             with self.lock:
@@ -169,6 +174,13 @@ class manipulatorController(Node):
 
         self.vacuum_gripper.close()
 
+        if self.home_is_requested():
+            return
+        
+        self.move_to_pose_offset(   self.yaw_rotation)
+        if self.home_is_requested():
+            return
+        
         if self.home_is_requested():
             return
 
@@ -222,7 +234,7 @@ class manipulatorController(Node):
         try:
             self.publish_status("Robot gaat naar up positie")
             self.move_to_home()
-            self.publish_status("Robot staat in up positie")
+            self.publish_status("Home_klaar")
 
         except Exception as e:
             self.publish_status(f"Fout tijdens move_home: {str(e)}")
