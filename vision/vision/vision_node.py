@@ -33,6 +33,20 @@ Responsibilities:
 Author:
     Hessel / ChatGPT
 =========================================================
+
+cd ~/c5_p24_eindproject_ws
+source /opt/ros/jazzy/setup.bash
+source .venv/bin/activate
+source install/setup.bash
+
+python3 -m colcon build \
+  --packages-select vision \
+  --symlink-install \
+  --allow-overriding project_interfaces
+
+source install/setup.bash
+ros2 launch vision vision.launch.py
+
 """
 
 # =========================================================
@@ -363,6 +377,10 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                 self.aruco_size_m  # Aslengte
             )
 
+            self.get_logger().info(
+                f'ArUco ID {marker_id}: x={float(tvec[0]):.3f} m, y={float(tvec[1]):.3f} m, z={float(tvec[2]):.3f} m'
+            )
+
             return frame, True  # Geef frame en successtatus terug
 
         self.world_calibrated = False  # Geen juiste marker gevonden
@@ -591,17 +609,33 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def transform_to_world(self, x, y, z):
-        if self.tvec is None or self.rvec is None:  # Controleer of ArUco pose beschikbaar is
-            raise RuntimeError("Cannot transform point: ArUco world calibration is unavailable")  # Geef fout bij ontbrekende pose
+        if self.tvec is None or self.rvec is None:  # Controleer of ArUco-pose beschikbaar is
+            raise RuntimeError("Cannot transform point: ArUco world calibration is unavailable")  # Geef fout bij ontbrekende ArUco-pose
 
-        rotation_marker_to_camera, _ = cv2.Rodrigues(self.rvec)  # Zet rvec om naar rotatiematrix
-        rotation_camera_to_marker = rotation_marker_to_camera.T  # Inverteer rotatie
-        translation_camera_to_marker = (-rotation_camera_to_marker @ self.tvec)  # Inverteer translatie
-        point_camera = np.array([[x], [y], [z]], dtype=np.float64)  # Bouw punt in cameracoördinaten
-        point_marker = rotation_camera_to_marker @ point_camera + translation_camera_to_marker  # Transformeer camera naar markerframe
-        point_world = point_marker + np.array([[ARUCO_WORLD_X], [ARUCO_WORLD_Y], [ARUCO_WORLD_Z]], dtype=np.float64)  # Voeg marker-world offset toe
+        rotation_marker_to_camera, _ = cv2.Rodrigues(self.rvec)  # Zet OpenCV rvec om naar rotatiematrix van marker naar camera
+        rotation_camera_to_marker = rotation_marker_to_camera.T  # Inverteer rotatie zodat camera naar marker wordt
+        translation_camera_to_marker = -rotation_camera_to_marker @ self.tvec  # Inverteer translatie zodat camera naar marker wordt
 
-        return (float(point_world[0, 0]), float(point_world[1, 0]), float(point_world[2, 0]))  # Geef world XYZ terug
+        point_camera = np.array(  # Maak objectpunt in camera-coördinaten
+            [[x], [y], [z]],  # Gebruik kolomvector met x, y, z
+            dtype=np.float64  # Gebruik float64 voor stabiele matrixberekeningen
+        )
+
+        point_marker = rotation_camera_to_marker @ point_camera + translation_camera_to_marker  # Transformeer objectpunt van camera-frame naar ArUco-frame
+
+        rotation_robot_aruco = np.array(ARUCO_TO_ROBOT_ROTATION, dtype=np.float64)  # Laad vaste rotatie van ArUco-frame naar robot-base-frame uit config
+        translation_robot_aruco = np.array(  # Maak translatie van ArUco-frame naar robot-base-frame
+            [[ARUCO_WORLD_X], [ARUCO_WORLD_Y], [ARUCO_WORLD_Z]],  # Gebruik gemeten markercentrumpositie t.o.v. robot base
+            dtype=np.float64  # Gebruik float64 voor stabiele matrixberekeningen
+        )
+
+        point_robot = rotation_robot_aruco @ point_marker + translation_robot_aruco  # Transformeer objectpunt van ArUco-frame naar robot-base-frame
+
+        return (  # Geef positie terug als gewone Python floats
+            float(point_robot[0, 0]),  # Geef robot-base X terug
+            float(point_robot[1, 0]),  # Geef robot-base Y terug
+            float(point_robot[2, 0])  # Geef robot-base Z terug
+        )
 
     # =====================================================
     # Reconnect Camera
