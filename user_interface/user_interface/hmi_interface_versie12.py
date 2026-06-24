@@ -31,7 +31,7 @@ class HumanInterface(Node):
         self.ui_start_stop_active = self.ui_reset_pressed = self.ui_training_inference_active = False
         
         # Interne MoveGroup parameters (als float tussen 0.05 en 0.50 vanwege de 50% limiet)
-        self.snelheid_laatste = 0.30  # Standaard 30%
+        self.snelheid_laatste = 0.10  # Standaard 10%
         self.versnelling_laatste = 0.20  # Standaard 20%
         self.vision_confidence_laatste = 0.70
 

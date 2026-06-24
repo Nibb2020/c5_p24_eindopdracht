@@ -33,7 +33,7 @@ class MockVision(Node):
         response.translation = [
             0.30,
             0.20,
-            0.05,
+            0.12,
         ]
         response.rotation = 0.0
 

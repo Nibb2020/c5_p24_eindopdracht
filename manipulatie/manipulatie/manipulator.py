@@ -102,7 +102,7 @@ class manipulatorController(Node):
         self.get_logger().info(f"Service ontvangen, voorwerp is: {request.klasse}")
         self.klasse = request.klasse
         self.translation = request.translation
-        self.translation[2] = 0.1
+        #self.translation[2] = 0.1
         self.yaw_rotation = request.rotation
 
         with self.lock:
@@ -184,13 +184,13 @@ class manipulatorController(Node):
         if self.home_is_requested():
             return
 
-        if self.klasse == "hooi":
+        if self.klasse == "schip":
             self.move_to_state("drop1")
-        elif self.klasse == "kanon":
+        elif self.klasse == "dino":
             self.move_to_state("drop2")
-        elif self.klasse == "rood":
+        elif self.klasse == "olifant":
             self.move_to_state("drop3")
-        elif self.klasse == "blauw":
+        elif self.klasse == "smiley":
             self.move_to_state("drop4")
         else:
             self.get_logger().warn("Sorry, er is geen object van een van de vier klasse gedetecteerd")
