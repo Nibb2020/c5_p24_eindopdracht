@@ -10,7 +10,7 @@ from PIL import Image, ImageTk
 import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rcl_interfaces.srv import SetParameters # Nodig om parameters op een andere node te zetten
+from rclpy.parameter_client import AsyncParameterClient
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger, SetBool
 
@@ -23,7 +23,7 @@ class HumanInterface(Node):
 
         self.root = root
 
-        self.root.geometry("1000x530")
+        self.root.geometry("1000x570")
         self.root.title("HMI Interface - OpenCV Video Display")
         self.root.resizable(False, False)
 
@@ -33,7 +33,8 @@ class HumanInterface(Node):
         # Interne MoveGroup parameters (als float tussen 0.05 en 0.50 vanwege de 50% limiet)
         self.snelheid_laatste = 0.30  # Standaard 30%
         self.versnelling_laatste = 0.20  # Standaard 20%
-        
+        self.vision_confidence_laatste = 0.70
+
         self.robot_status = "UNKNOWN"
         self.is_countdown_active = False  # Houdt bij of er een timer loopt
 
@@ -42,27 +43,26 @@ class HumanInterface(Node):
         self.pending_retry = False
 
         # ================= ROS2 CONFIGURATIE =================
+        #publishers
         self.pub_start_stop = self.create_publisher(Bool, "/ui/start_stop", 10)
-        self.sub_robot_status = self.create_subscription(
-            String,
-            "/controller/state",
-            self.robot_status_callback,
-            10
-        )
 
-        self.cli_reset = self.create_client(Trigger, "/ui/reset_error")
-        self.cli_retry = self.create_client(Trigger, "/ui/retry")
-        self.cli_training = self.create_client(SetBool, "/ui/training_mode")
+        #subscribers
+        self.sub_robot_status = self.create_subscription(String,"/controller/state",self.robot_status_callback,10)
+        self.sub_robot_warning = self.create_subscription(String,"/controller/warning",self.robot_warning_callback,10)
+        self.sub_robot_error = self.create_subscription(String,"/controller/error",self.robot_error_callback,10)
+
+        #clients
+        self.cli_reset = self.create_client(Trigger,"/ui/reset_error")
+        self.cli_retry = self.create_client(Trigger,"/ui/retry")
+        self.cli_training = self.create_client(SetBool,"/ui/training_mode")
+        self.cli_move_home = self.create_client(Trigger,"/ui/move_home")
 
         # --- REMOTE PARAMETER CLIENT CONFIGURATIE ---
-        # Vul hier de exacte node-naam in van de node die jouw MovegroupHelper aanmaakt!
-        self.andere_node_naam = "manipulatie" 
-        
-        self.cli_remote_param = self.create_client(
-            SetParameters, 
-            f"/{self.andere_node_naam}/set_parameters"
-        )
+        self.andere_node_naam = "manipulator"
+        self.remote_parameter_client = AsyncParameterClient(self,self.andere_node_naam)
 
+        self.controller_node_naam = "robot_controller"
+        self.controller_parameter_client = AsyncParameterClient(self,self.controller_node_naam)
         # =====================================================
         # ==================== UI LAYOUT ======================
         # =====================================================
@@ -108,6 +108,7 @@ class HumanInterface(Node):
         self.turn_off = tk.Button(self.action_button_container, text="OFF", width=10, height=2, command=self.toggle_turn_off)
         self.reset = tk.Button(self.action_button_container, text="RESET", width=10, height=2, command=self.toggle_ui_reset, activebackground="yellow")
         self.retry = tk.Button(self.action_button_container, text="RETRY", width=10, height=2, bg="lightgray", command=self.trigger_ui_retry)
+        self.btn_home = tk.Button(self.action_button_container,text="HOME",width=10,height=2,bg="purple",fg="white",command=self.trigger_manipulator_home)
 
         # Eénmalige stabiele initiële opbouw van de knoppen
         self.turn_on.pack(side=tk.LEFT, padx=(0, 5))
@@ -141,6 +142,23 @@ class HumanInterface(Node):
         )
         self.slider_versnelling.bind("<ButtonRelease-1>", self.update_versnelling)
         self.slider_versnelling.pack(side=tk.LEFT, padx=5)
+
+        self.vision_settings_frame = tk.Frame(self.right_panel)
+        self.vision_settings_frame.pack(fill=tk.X,pady=(0,15))
+
+        #Vision parameters interface
+        self.lbl_threshold = tk.Label(self.vision_settings_frame,text="Vision confidence:")
+        self.lbl_threshold.pack(side=tk.LEFT,padx=(5,10))
+
+        self.entry_threshold = tk.Entry(self.vision_settings_frame,width=8)
+        self.entry_threshold.insert(0,str(int(self.vision_confidence_laatste * 100)))
+        self.entry_threshold.pack(side=tk.LEFT,padx=5)
+
+        self.lbl_procent_teken = tk.Label(self.vision_settings_frame,text="%")
+        self.lbl_procent_teken.pack(side=tk.LEFT,padx=(0,15))
+
+        self.btn_set_threshold = tk.Button(self.vision_settings_frame,text="Toepassen",command=self.update_remote_threshold)
+        self.btn_set_threshold.pack(side=tk.LEFT,padx=(0,15))
 
         self.log_frame = tk.Frame(self.right_panel)
         self.log_frame.pack(fill=tk.BOTH, expand=True)
@@ -189,6 +207,24 @@ class HumanInterface(Node):
 
                 self.root.after(0,self._deblokkeer_na_retry)
 
+    def robot_warning_callback(self, msg: String):
+        warning = msg.data.strip()
+
+        # The controller publishes an empty string when a warning is cleared.
+        if not warning:
+            return
+
+        self.root.after(0,lambda text=warning: self.update_ui_log(f"[WAARSCHUWING] {text}"))
+
+
+    def robot_error_callback(self, msg: String):
+        error = msg.data.strip()
+
+        # The controller publishes an empty string when an error is cleared.
+        if not error:
+            return
+
+        self.root.after(0,lambda text=error: self.update_ui_log(f"[ERROR] {text}"))
     # =====================================================
     # UITGAANDE COMMUNICATIE (Publishers & Services)
     # =====================================================
@@ -235,30 +271,45 @@ class HumanInterface(Node):
         future.add_done_callback(done_callback)
         return True
 
-    def _verstuur_remote_parameter(self, param_naam, param_waarde):
-        """ Stuur asynchroon een parameter update naar de andere node """
-        if not self.cli_remote_param.wait_for_service(timeout_sec=1.0):
-            self.root.after(0, lambda: self.update_ui_log(f"[ROS2 FOUT] Kan parameters op node '{self.andere_node_naam}' niet aanpassen!"))
+    def _verstuur_remote_parameter(self,param_naam,param_waarde):
+        self._verstuur_parameter(self.remote_parameter_client,self.andere_node_naam,param_naam,param_waarde)
+
+    def _verstuur_parameter(self,client,node_naam,param_naam,param_waarde):
+        if not client.services_are_ready():
+            self.root.after(0,lambda: self.update_ui_log(f"[ROS2 FOUT] Parameterservice van '/{node_naam}' is niet bereikbaar."))
             return
 
-        p = Parameter(param_naam, Parameter.Type.DOUBLE, param_waarde)
-        
-        req = SetParameters.Request()
-        req.parameters = [p.to_parameter_msg()]
-        
-        future = self.cli_remote_param.call_async(req)
-        future.add_done_callback(lambda f: self._handle_remote_param_response(f, param_naam, param_waarde))
+        if isinstance(param_waarde,bool): parameter_type = Parameter.Type.BOOL
+        elif isinstance(param_waarde,float): parameter_type = Parameter.Type.DOUBLE
+        elif isinstance(param_waarde,int): parameter_type = Parameter.Type.INTEGER
+        else:
+            self.root.after(0,lambda: self.update_ui_log(f"[PARAMETER FOUT] Niet ondersteund type voor '{param_naam}'."))
+            return
 
-    def _handle_remote_param_response(self, future, naam, waarde):
+        parameter = Parameter(param_naam,parameter_type,param_waarde)
+        future = client.set_parameters([parameter])
+        future.add_done_callback(lambda completed_future: self._handle_remote_param_response(completed_future,node_naam,param_naam,param_waarde))
+
+    def _handle_remote_param_response(self,future,node_naam,naam,waarde):
         try:
-            res = future.result()
-            if res and res.results[0].successful:
-                self.get_logger().info(f"Parameter '{naam}' succesvol aangepast op {self.andere_node_naam} naar {waarde:.2f}")
+            response = future.result()
+
+            if response is None or not response.results:
+                self.root.after(0,lambda: self.update_ui_log(f"[PARAMETER FOUT] Geen resultaat ontvangen voor '{naam}'."))
+                return
+
+            result = response.results[0]
+
+            if result.successful:
+                self.get_logger().info(f"Parameter '{naam}' aangepast naar {waarde} op /{node_naam}")
+                self.root.after(0,lambda: self.update_ui_log(f"[HMI] {naam} ingesteld op {waarde}"))
             else:
-                reason = res.results[0].reason if res else "Onbekend"
-                self.root.after(0, lambda: self.update_ui_log(f"[ROS2 WAARSCHUWING] Node weigerde parameter: {reason}"))
-        except Exception as e:
-            self.get_logger().error(f"Remote parameter call mislukt: {e}")
+                reason = result.reason or "Onbekende reden"
+                self.root.after(0,lambda: self.update_ui_log(f"[PARAMETER FOUT] '{naam}' geweigerd: {reason}"))
+
+        except Exception as exception:
+            self.get_logger().error(f"Parameter aanpassen mislukt: {exception}")
+            self.root.after(0,lambda: self.update_ui_log(f"[PARAMETER FOUT] {exception}"))
 
     # =====================================================
     # BUTTON INTERACTIES & VISUELE COUNTDOWN LOGICA
@@ -282,6 +333,7 @@ class HumanInterface(Node):
         self.turn_on.config(bg="green", activebackground="lightgreen")
         self.turn_off.config(bg="lightgray")
         self.reset.config(bg="lightgray")
+        self.btn_home.config(state="normal")
         
         self.update_ui_log(f"[HMI] Systeem aangezet (ON). Snelheid scaling: {int(self.snelheid_laatste * 100)}%")
         self.publiceer_start_stop(True)
@@ -301,6 +353,7 @@ class HumanInterface(Node):
         self.turn_off.config(state="normal", bg="red", activebackground="pink")
         self.reset.config(bg="lightgray")
         self.training.config(bg="blue", fg="white", state="normal")
+        self.btn_home.config(state="normal")
 
         self.update_ui_log("[HMI] Systeem uitgezet (OFF).")
         self.publiceer_start_stop(False)
@@ -314,6 +367,7 @@ class HumanInterface(Node):
             self._wissel_ui_modus(naar_training=True)
             self.training.config(bg="blue", activebackground="purple")
             self.reset.config(bg="orange")
+            self.btn_home.config(state="disabled")
 
             self.slider_snelheid.config(state="normal", label=f"Snelheid (Actief: {int(self.snelheid_laatste * 100)}%)")
             self.slider_versnelling.config(state="normal", label=f"Versnelling (Actief: {int(self.versnelling_laatste * 100)}%)")
@@ -340,13 +394,17 @@ class HumanInterface(Node):
 
                 self.ui_training_inference_active = (not self.ui_training_inference_active)
 
-                self.root.after(0,lambda: self._wissel_ui_modus(naar_training=(self.ui_training_inference_active)))
+                self.root.after(0,self._herstel_ui_na_training_fout)
                 return
 
             self.root.after(0,lambda: self.update_ui_log(f"[HMI] {response.message}"))
 
         except Exception as exception:
             self.get_logger().error(f"Training service call mislukt: {exception}")
+
+    def _herstel_ui_na_training_fout(self):
+        self._wissel_ui_modus(naar_training=self.ui_training_inference_active)
+        self.btn_home.config(state="disabled" if self.ui_training_inference_active else "normal")
 
     def toggle_ui_reset(self):
         if self.is_countdown_active: return
@@ -414,6 +472,26 @@ class HumanInterface(Node):
             originele_tekst="RETRY",
             callback_functie=self._verstuur_retry_service
         )
+
+    def trigger_manipulator_home(self):
+        if self.is_countdown_active: 
+            return
+        
+        success = self.call_trigger_service_async(self.cli_move_home,self._handle_move_home_response)
+
+        if success: 
+            self.update_ui_log("[HMI] HOME aangevraagd.")
+
+    def _handle_move_home_response(self,future):
+        try:
+            response = future.result()
+            if response.success:
+                self.root.after(0,lambda: self.update_ui_log(f"[HMI] {response.message}"))
+            else:
+                self.root.after(0,lambda: self.update_ui_log(f"[HOME FOUT] {response.message}"))
+        except Exception as exception:
+            self.get_logger().error(f"Move-home service call mislukt: {exception}")
+            self.root.after(0,lambda: self.update_ui_log(f"[HOME FOUT] {exception}"))
 
     def _verstuur_retry_service(self):
         success = self.call_trigger_service_async(self.cli_retry,self._handle_retry_response)
@@ -504,14 +582,36 @@ class HumanInterface(Node):
         # Stuur de float-waarde (max 0.50) live naar de manipulator
         self._verstuur_remote_parameter("acceleration_scaling", val_float)
 
-    def _set_buttons_state(self, state):
+    def update_remote_threshold(self):
+        if self.is_countdown_active: return
+
+        try:
+            val_percentage = int(self.entry_threshold.get().strip())
+        except ValueError:
+            self.update_ui_log("[VISION FOUT] Confidence moet een geheel getal zijn.")
+            return
+
+        if not 0 <= val_percentage <= 100:
+            self.update_ui_log("[VISION FOUT] Confidence moet tussen 0% en 100% liggen.")
+            return
+
+        confidence = val_percentage / 100.0
+        self.vision_confidence_laatste = confidence
+        self._verstuur_parameter(self.controller_parameter_client,self.controller_node_naam,"vision_confidence",confidence)
+
+    
+    def _set_buttons_state(self,state):
         self.turn_on.config(state=state)
         self.turn_off.config(state=state)
         self.reset.config(state=state)
         self.retry.config(state=state)
         self.training.config(state=state)
+        self.btn_home.config(state=state)
         self.slider_snelheid.config(state=state)
         self.slider_versnelling.config(state=state)
+        self.btn_set_threshold.config(state=state)
+        self.entry_threshold.config(state=state)
+        self.chk_awb.config(state=state)
 
     def _herstel_na_reset(self, was_in_training=False):
         del was_in_training
@@ -549,22 +649,25 @@ class HumanInterface(Node):
         if self.ui_start_stop_active and self.slider_snelheid.get() > 5:
             self.snelheid_laatste = self.slider_snelheid.get() / 100.0
 
-    def _wissel_ui_modus(self, naar_training=False):
+    def _wissel_ui_modus(self,naar_training=False):
+        self.turn_on.pack_forget()
+        self.turn_off.pack_forget()
+        self.reset.pack_forget()
+        self.retry.pack_forget()
+        self.btn_home.pack_forget()
+
         if naar_training:
-            self.turn_on.pack_forget()
-            self.turn_off.pack_forget()
-            
-            self.reset.pack(side=tk.LEFT, padx=(0, 5))
-            self.retry.pack(side=tk.LEFT)
-            self.slider_versnelling.pack(side=tk.LEFT, padx=5)
+            self.reset.pack(side=tk.LEFT,padx=(0,5))
+            self.retry.pack(side=tk.LEFT,padx=(0,5))
+            self.btn_home.pack(side=tk.LEFT)
+            self.slider_versnelling.pack(side=tk.LEFT,padx=5)
         else:
-            self.retry.pack_forget()
             self.slider_versnelling.pack_forget()
-            
-            self.turn_on.pack(side=tk.LEFT, padx=(0, 5))
-            self.turn_off.pack(side=tk.LEFT, padx=(0, 5))
-            self.reset.pack(side=tk.LEFT, padx=(0, 5))
-            
+            self.turn_on.pack(side=tk.LEFT,padx=(0,5))
+            self.turn_off.pack(side=tk.LEFT,padx=(0,5))
+            self.reset.pack(side=tk.LEFT,padx=(0,5))
+            self.btn_home.pack(side=tk.LEFT)
+
         self.root.update_idletasks()
 
     def _video_loop(self):

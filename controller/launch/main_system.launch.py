@@ -19,7 +19,16 @@ def generate_launch_description():
         output="screen",
     )
 
+    user_interface_node = Node(
+        package="user_interface",
+        executable="hmi_interface_versie12",
+        name="hmi_node",
+        output="screen",
+        emulate_tty=True,
+    )
+
     return LaunchDescription([
         supervisor_node,
         state_machine_node,
+        user_interface_node,
     ])

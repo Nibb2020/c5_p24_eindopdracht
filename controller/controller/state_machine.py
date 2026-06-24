@@ -77,14 +77,6 @@ class RobotController(Node):
         self.reset_home_command_sent = False
 
         self.declare_parameter("vision_confidence", 0.7)
-        self.declare_parameter("vision_awb", True)
-
-        self.vision_confidence = self.get_parameter(
-            "vision_confidence"
-        ).value
-        self.vision_awb = self.get_parameter(
-            "vision_awb"
-        ).value
 
         self.state_publisher = self.create_publisher(
             String,
@@ -302,8 +294,7 @@ class RobotController(Node):
         generation = self.operation_generation
 
         request = VoorwerpData.Request()
-        request.confidence = float(self.vision_confidence)
-        request.awb = bool(self.vision_awb)
+        request.confidence = float(self.get_parameter("vision_confidence").value)
 
         future = self.vision_client.call_async(request)
         future.add_done_callback(
