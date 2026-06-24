@@ -25,7 +25,6 @@ setup(
     entry_points={
         'console_scripts': [
             "hmi_interface_versie12 = user_interface.hmi_interface_versie12:main",
-            "rviz_screen_publisher = user_interface.rviz_screen_publisher:main",
         ],
     },
 )

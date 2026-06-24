@@ -67,27 +67,20 @@ class HumanInterface(Node):
         # ==================== UI LAYOUT ======================
         # =====================================================
 
-        self.left_panel = tk.Frame(self.root)
-        self.left_panel.pack(side=tk.LEFT, padx=15, pady=10, fill=tk.Y)
+        self.camera_panel = tk.Frame(self.root)
+        self.camera_panel.pack(side=tk.RIGHT, padx=15, pady=10, fill=tk.Y)
 
-        self.right_panel = tk.Frame(self.root)
-        self.right_panel.pack(side=tk.RIGHT, padx=15, pady=10, fill=tk.BOTH, expand=True)
+        self.control_panel = tk.Frame(self.root)
+        self.control_panel.pack(side=tk.LEFT, padx=15, pady=10, fill=tk.BOTH, expand=True)
 
-        self.frame_left = tk.Frame(self.left_panel, bg="black", width=320, height=240)
-        self.frame_left.pack(pady=(0, 10))
+        self.frame_left = tk.Frame(self.camera_panel, bg="black", width=320, height=240)
+        self.frame_left.pack()
         self.frame_left.pack_propagate(False)
 
         self.camera_label = tk.Label(self.frame_left, bg="black")
         self.camera_label.pack(fill="both", expand=True)
 
-        self.frame_right = tk.Frame(self.left_panel, bg="green", width=320, height=240)
-        self.frame_right.pack()
-        self.frame_right.pack_propagate(False)
-
-        self.rviz_label = tk.Label(self.frame_right, bg="black")
-        self.rviz_label.pack(fill="both", expand=True)
-
-        self.buttons_frame = tk.Frame(self.right_panel)
+        self.buttons_frame = tk.Frame(self.control_panel)
         self.buttons_frame.pack(fill=tk.X, pady=(0, 15))
 
         self.training = tk.Button(
@@ -116,7 +109,7 @@ class HumanInterface(Node):
         self.reset.pack(side=tk.LEFT, padx=(0, 5))
         self.retry.pack(side=tk.LEFT)
 
-        self.sliders_frame = tk.Frame(self.right_panel)
+        self.sliders_frame = tk.Frame(self.control_panel)
         self.sliders_frame.pack(fill=tk.X, pady=(0, 15))
 
         # Snelheid Slider (Visueel in %: 5 tot 100)
@@ -143,7 +136,7 @@ class HumanInterface(Node):
         self.slider_versnelling.bind("<ButtonRelease-1>", self.update_versnelling)
         self.slider_versnelling.pack(side=tk.LEFT, padx=5)
 
-        self.vision_settings_frame = tk.Frame(self.right_panel)
+        self.vision_settings_frame = tk.Frame(self.control_panel)
         self.vision_settings_frame.pack(fill=tk.X,pady=(0,15))
 
         #Vision parameters interface
@@ -160,7 +153,7 @@ class HumanInterface(Node):
         self.btn_set_threshold = tk.Button(self.vision_settings_frame,text="Toepassen",command=self.update_remote_threshold)
         self.btn_set_threshold.pack(side=tk.LEFT,padx=(0,15))
 
-        self.log_frame = tk.Frame(self.right_panel)
+        self.log_frame = tk.Frame(self.control_panel)
         self.log_frame.pack(fill=tk.BOTH, expand=True)
 
         self.log = tk.Text(self.log_frame, height=7, state="disabled",
@@ -168,10 +161,6 @@ class HumanInterface(Node):
         self.log.pack(fill=tk.BOTH, expand=True)
 
         # OpenCV Initialisatie
-        self.cap_rviz = cv2.VideoCapture("http://localhost:8080/stream?topic=/rviz/camera_image")
-        self.cap_rviz.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        self.cap_rviz.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-
         self.cap = cv2.VideoCapture(0)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
@@ -611,7 +600,6 @@ class HumanInterface(Node):
         self.slider_versnelling.config(state=state)
         self.btn_set_threshold.config(state=state)
         self.entry_threshold.config(state=state)
-        self.chk_awb.config(state=state)
 
     def _herstel_na_reset(self, was_in_training=False):
         del was_in_training
@@ -682,22 +670,11 @@ class HumanInterface(Node):
                 self.camera_label.photo_image = photo_image
                 self.camera_label.configure(image=photo_image)
 
-        if self.cap_rviz.isOpened():
-            ret_rviz, frame_rviz = self.cap_rviz.read()
-            if ret_rviz:
-                rviz_image_rgb = cv2.cvtColor(frame_rviz, cv2.COLOR_BGR2RGBA)
-                rviz_captured_image = Image.fromarray(rviz_image_rgb)
-                rviz_photo_image = ImageTk.PhotoImage(image=rviz_captured_image)
-                self.rviz_label.photo_image = rviz_photo_image
-                self.rviz_label.configure(image=rviz_photo_image)
-
         self.root.after(15, self._video_loop)
 
     def close_hardware(self):
         if hasattr(self, 'cap') and self.cap.isOpened():
             self.cap.release()
-        if hasattr(self, 'cap_rviz') and self.cap_rviz.isOpened():
-            self.cap_rviz.release()
 
 
 # =====================================================
