@@ -756,20 +756,33 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def vision_processing_loop(self):
-        if not self.running or self.device is None:  # Controleer camera actief
-            return  # Stop zonder camera
+        if not self.running or self.device is None:  # Controleer of de camera actief is
+            return  # Stop wanneer de camera niet actief is
 
-        if self.rgb_queue is None:  # Controleer RGB queue
-            return  # Stop zonder queue
+        if self.rgb_queue is None:  # Controleer of de RGB queue bestaat
+            return  # Stop wanneer er geen RGB queue beschikbaar is
 
-        rgb_packet = self.rgb_queue.tryGet()  # Lees live RGB-frame
-        if rgb_packet is None:  # Controleer frame beschikbaar
-            return  # Stop zonder frame
+        rgb_packet = self.rgb_queue.tryGet()  # Lees live RGB-frame non-blocking uit de queue
 
-        self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
-        frame = rgb_packet.getCvFrame()  # Haal OpenCV-frame op
-        self.latest_frame = frame.copy()  # Bewaar laatste frame
-        self.marked_image_pub.publish(self.bridge.cv2_to_imgmsg(frame, encoding="bgr8"))  # Publiceer live preview
+        if rgb_packet is None:  # Controleer of er een nieuw frame beschikbaar is
+            return  # Stop wanneer er geen nieuw frame is
+
+        self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd zodat de watchdog weet dat de camera leeft
+
+        frame = rgb_packet.getCvFrame()  # Haal OpenCV-frame uit het DepthAI packet
+        self.latest_frame = frame.copy()  # Bewaar laatste frame intern voor eventuele debug of latere inspectie
+
+        if not DEBUG_PUBLISH_CONTINUOUS:  # Controleer of continue debugpublicatie uit staat
+            return  # Stop zonder iets te publiceren
+
+        debug_frame = frame.copy()  # Maak een kopie zodat het originele frame niet onnodig aangepast wordt
+
+        if DEBUG_DRAW_ARUCO_LIVE:  # Controleer of ArUco-overlays in live debugbeeld gewenst zijn
+            debug_frame, _ = self.estimate_aruco_pose(debug_frame)  # Teken ArUco-pose op het debugbeeld indien marker zichtbaar is
+
+        self.marked_image_pub.publish(  # Publiceer het debugbeeld alleen wanneer DEBUG_PUBLISH_CONTINUOUS True is
+            self.bridge.cv2_to_imgmsg(debug_frame, encoding="bgr8")  # Converteer OpenCV BGR-frame naar ROS Image message
+        )
 
     # =====================================================
     # Robot Filtering
@@ -889,29 +902,40 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def main_loop(self):
-        if not self.running:  # Controleer of node actief is
-            return  # Stop wanneer camera niet draait
-        if not USE_YOLO:  # Draai tijdelijke RGB/depth preview zonder YOLO
+        if not self.running:  # Controleer of de node actief is
+            return  # Stop wanneer camera/node niet draait
+
+        if self.rgb_queue is None:  # Controleer of de RGB queue beschikbaar is
+            return  # Stop wanneer er geen RGB queue is
+
+        if not USE_YOLO:  # Gebruik tijdelijke RGB/depth/ArUco modus zonder YOLO
             rgb_packet = self.rgb_queue.tryGet()  # Lees RGB-packet non-blocking
 
-            if rgb_packet is None:  # Geen nieuw frame beschikbaar
-                return  # Stop deze timer-iteratie
+            if rgb_packet is None:  # Controleer of er een nieuw frame beschikbaar is
+                return  # Stop deze timer-iteratie zonder watchdogupdate
 
-            frame = rgb_packet.getCvFrame()  # Haal OpenCV-frame op
-            self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
+            frame = rgb_packet.getCvFrame()  # Haal OpenCV-frame op uit DepthAI packet
+            self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd omdat er een geldig RGB-frame is ontvangen
+            self.latest_frame = frame.copy()  # Bewaar laatste frame intern voor debug of inspectie
 
-            frame, _ = self.estimate_aruco_pose(frame)  # Probeer ArUco-pose te schatten
+            if not DEBUG_PUBLISH_CONTINUOUS:  # Controleer of continue debugpublicatie uit staat
+                return  # Stop zonder marked image te publiceren
 
-            self.marked_image_pub.publish(  # Publiceer gemarkeerde preview
-                self.bridge.cv2_to_imgmsg(frame, encoding='bgr8')
+            debug_frame = frame.copy()  # Maak kopie voor tekenen/publiceren
+
+            if DEBUG_DRAW_ARUCO_LIVE:  # Controleer of ArUco in live debugbeeld getekend moet worden
+                debug_frame, _ = self.estimate_aruco_pose(debug_frame)  # Schat en teken ArUco-pose alleen in debugmodus
+
+            self.marked_image_pub.publish(  # Publiceer marked image alleen wanneer debugpublicatie aan staat
+                self.bridge.cv2_to_imgmsg(debug_frame, encoding="bgr8")  # Converteer OpenCV-frame naar ROS Image
             )
 
-            return  # Stop hier; geen YOLO-verwerking
+            return  # Stop hier omdat YOLO uit staat
 
         try:
-            self.vision_processing_loop()  # Voer live preview loop uit
+            self.vision_processing_loop()  # Verwerk live/debug preview wanneer YOLO actief is
         except Exception as ex:
-            self.get_logger().error(str(ex))  # Log fout
+            self.get_logger().error(str(ex))  # Log foutmelding
             reconnect_thread = threading.Thread(target=self.reconnect_camera, daemon=True)  # Maak reconnectthread
             reconnect_thread.start()  # Start reconnectthread
 

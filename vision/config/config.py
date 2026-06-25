@@ -2,6 +2,13 @@ import cv2
 import numpy as np
 
 # ==================================================
+# Debug
+# ==================================================
+
+DEBUG_PUBLISH_CONTINUOUS = False  # True = live marked image constant publiceren, False = alleen publiceren bij service request
+DEBUG_DRAW_ARUCO_LIVE = True  # True = ArUco tekenen in debugbeeld, False = live debugbeeld zonder ArUco-overlay
+
+# ==================================================
 # Camera
 # ==================================================
 
@@ -54,7 +61,7 @@ DATASET_FOLDER = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vi
 # Model
 # ==================================================
 
-MODEL_PATH = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/YOLOv6_Nano-R2_COCO_512x288.rvc2.tar.xz"  # Pad naar YOLO-model
+MODEL_PATH = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/V0.1/best_openvino_2022.1_6shave.blob"  # Pad naar YOLO-model
 
 # ==================================================
 # YOLO
@@ -120,8 +127,8 @@ ARUCO_TO_ROBOT_ROTATION = np.array(  # Rotatie van ArUco-frame naar robot-base-f
 ROBOT_FILTER_ENABLED = True  # Schakel robotfiltering aan of uit
 ROBOT_ALLOWED_CLASS_IDS = [0, 1, 2, 3, 4]  # Klasses die robot mag oppakken
 
-ROBOT_MIN_X_M = 0.383   # Minimum world-X voor robotbereik
-ROBOT_MAX_X_M = 0.125    # Maximum world-X voor robotbereik
+ROBOT_MIN_X_M = 0.125   # Minimum world-X voor robotbereik
+ROBOT_MAX_X_M = 0.383    # Maximum world-X voor robotbereik
 ROBOT_MIN_Y_M = 0.0625   # Minimum world-Y voor robotbereik
 ROBOT_MAX_Y_M = 0.2768    # Maximum world-Y voor robotbereik
 ROBOT_MIN_Z_M = 0.0883   # Minimum world-Z voor robotbereik
