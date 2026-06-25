@@ -1,4 +1,4 @@
-#!/usr/bin/env python3  # Gebruik Python 3 als interpreter
+#!/usr/bin/env python3
 
 """
 =========================================================
@@ -122,13 +122,22 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         self.camera_position = None  # Gereserveerd voor camerapositie, momenteel niet actief gebruikt
         self.aruco_dict = cv2.aruco.getPredefinedDictionary(ARUCO_DICTIONARY)  # Laad ingestelde ArUco dictionary
         if hasattr(cv2.aruco, 'DetectorParameters_create'):  # Controleer oude OpenCV ArUco API
-            self.aruco_params = cv2.aruco.DetectorParameters_create()  # Maak parameters via oude API
+            self.aruco_params = cv2.aruco.DetectorParameters_create()  # Maak detectorparameters via oude API
         else:  # Gebruik nieuwe OpenCV ArUco API
-            self.aruco_params = cv2.aruco.DetectorParameters()  # Maak parameters via nieuwe API 
+            self.aruco_params = cv2.aruco.DetectorParameters()  # Maak detectorparameters via nieuwe API
+
+        self.aruco_params.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX  # Verfijn markerhoeken subpixel voor stabielere pose
+        self.aruco_params.cornerRefinementWinSize = 5  # Gebruik venster van 5 pixels voor corner refinement
+        self.aruco_params.cornerRefinementMaxIterations = 50  # Geef corner refinement genoeg iteraties
+        self.aruco_params.cornerRefinementMinAccuracy = 0.01  # Stop refinement bij hoge nauwkeurigheid
         self.camera_matrix = np.array(CAMERA_MATRIX, dtype=np.float32)  # Zet fallback cameramatrix om naar NumPy
         self.dist_coeffs = np.array(DIST_COEFFS, dtype=np.float32)  # Zet fallback distortioncoëfficiënten om naar NumPy
         self.rvec = None  # Laatst berekende marker-naar-camera rotatievector
         self.tvec = None  # Laatst berekende marker-naar-camera translatievector
+        self.last_valid_rvec = None  # Bewaar laatst geaccepteerde ArUco rotatievector
+        self.last_valid_tvec = None  # Bewaar laatst geaccepteerde ArUco translatievector
+        self.max_aruco_translation_jump_m = 0.02  # Maximale toegestane ArUco-positiesprong in meters
+        self.max_aruco_rotation_jump_rad = 0.35  # Maximale toegestane ArUco-rotatiesprong in radialen
         self.world_calibrated = False  # Houdt bij of world calibration geldig is
         self.aruco_marker_id = ARUCO_MARKER_ID  # ID van de vaste referentiemarker
         self.aruco_size_m = ARUCO_SIZE_M  # Fysieke markermaat in meters
@@ -203,6 +212,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         self.get_logger().info('Creating DepthAI pipeline...')  # Log dat de pipeline wordt opgebouwd
 
         pipeline = dai.Pipeline()  # Maak een nieuwe DepthAI pipeline aan
+        pipeline.setOpenVINOVersion(dai.OpenVINO.Version.VERSION_2022_1)  # Forceer dezelfde OpenVINO-versie als waarmee de blob is gecompileerd
 
         cam_rgb = pipeline.create(dai.node.ColorCamera)  # Maak de RGB-camera node aan
         left = pipeline.create(dai.node.MonoCamera)  # Maak de linker mono-camera node aan
@@ -217,7 +227,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         cam_rgb.setInterleaved(False)  # Gebruik planar output in plaats van interleaved output
         cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)  # Gebruik BGR-volgorde voor OpenCV
         cam_rgb.setPreviewSize(RGB_WIDTH, RGB_HEIGHT)  # Zet previewformaat vanuit config.py
-        cam_rgb.setPreviewKeepAspectRatio(True)  # Behoud aspect ratio bij het maken van de preview
+        cam_rgb.setPreviewKeepAspectRatio(False)  # Behoud aspect ratio bij het maken van de preview
 
         left.setBoardSocket(dai.CameraBoardSocket.CAM_B)  # Selecteer linker mono-camera op CAM_B
         right.setBoardSocket(dai.CameraBoardSocket.CAM_C)  # Selecteer rechter mono-camera op CAM_C
@@ -318,13 +328,12 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def estimate_aruco_pose(self, frame):
-
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)  # Zet BGR beeld om naar grayscale
 
-        corners, ids, _ = cv2.aruco.detectMarkers(  # Detecteer ArUco markers met oude OpenCV API
-            gray,  # Grayscale invoerbeeld
-            self.aruco_dict,  # ArUco dictionary uit config
-            parameters=self.aruco_params  # Detectieparameters
+        corners, ids, _ = cv2.aruco.detectMarkers(  # Detecteer ArUco markers
+            gray,  # Gebruik grayscale beeld
+            self.aruco_dict,  # Gebruik ingestelde ArUco dictionary
+            parameters=self.aruco_params  # Gebruik ingestelde detectorparameters
         )
 
         if ids is None:  # Controleer of er markers gevonden zijn
@@ -332,11 +341,18 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             return frame, False  # Geef frame terug zonder geldige pose
 
         for i, marker_id in enumerate(ids.flatten()):  # Loop door gevonden marker-ID's
-
             if int(marker_id) != self.aruco_marker_id:  # Controleer of dit de gewenste marker is
                 continue  # Sla andere markers over
 
-            marker_corners = corners[i].reshape((4, 2)).astype(np.float32)  # Zet corners naar OpenCV formaat
+            marker_corners = corners[i].reshape((4, 2)).astype(np.float32)  # Zet markerhoeken naar 4x2 float32
+
+            cv2.cornerSubPix(  # Verfijn markerhoeken nogmaals handmatig op subpixelniveau
+                gray,  # Gebruik grayscale beeld
+                marker_corners,  # Geef markerhoeken mee die verfijnd worden
+                (5, 5),  # Gebruik zoekvenster van 5x5 pixels
+                (-1, -1),  # Gebruik geen dead zone in het midden
+                (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 50, 0.01)  # Stopcriteria voor subpixel refinement
+            )
 
             half_size = self.aruco_size_m / 2.0  # Bereken halve markermaat
 
@@ -350,21 +366,31 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                 dtype=np.float32  # Gebruik float32 voor OpenCV
             )
 
-            success, rvec, tvec = cv2.solvePnP(  # Bereken markerpose t.o.v. camera
-                object_points,  # 3D markerpunten
-                marker_corners,  # 2D beeldpunten
-                self.camera_matrix,  # Cameramatrix
-                self.dist_coeffs,  # Distortioncoëfficiënten
-                flags=cv2.SOLVEPNP_IPPE_SQUARE  # Goede solvePnP methode voor vierkante markers
+            success, rvec, tvec, reprojection_error = self.choose_best_ippe_pose(  # Kies beste IPPE-pose
+                object_points,  # Geef 3D markerpunten mee
+                marker_corners  # Geef verfijnde 2D markerhoeken mee
             )
 
-            if not success:  # Controleer solvePnP resultaat
+            if not success:  # Controleer of solvePnPGeneric gelukt is
                 self.world_calibrated = False  # Zet world calibration uit
                 return frame, False  # Geef foutstatus terug
 
-            self.rvec = rvec  # Sla rotatievector op
-            self.tvec = tvec  # Sla translatievector op
+            if reprojection_error > ARUCO_MAX_REPROJECTION_ERROR_PX:  # Controleer reprojection error
+                self.get_logger().warn(f"Rejected ArUco pose: reprojection error {reprojection_error:.3f} px")  # Log fout
+                self.world_calibrated = False  # Zet world calibration uit
+                return frame, False  # Weiger onbetrouwbare pose
+
+            if ARUCO_USE_POSE_VALIDATION and not self.accept_aruco_pose(rvec, tvec):  # Controleer of pose geen onrealistische sprong maakt
+                self.world_calibrated = False  # Zet world calibration uit
+                return frame, False  # Weiger springende pose
+
+            self.rvec = rvec.copy()  # Sla geaccepteerde rotatievector op
+            self.tvec = tvec.copy()  # Sla geaccepteerde translatievector op
             self.world_calibrated = True  # Markeer world calibration als geldig
+
+            self.get_logger().info(f"ArUco reprojection error: {reprojection_error:.3f} px")  # Log reprojection error
+            self.get_logger().info(f"ArUco rvec: {self.rvec.flatten()}")  # Log ArUco rotatievector
+            self.get_logger().info(f"ArUco tvec: {self.tvec.flatten()}")  # Log ArUco translatievector
 
             cv2.aruco.drawDetectedMarkers(frame, corners, ids)  # Teken gevonden markers
 
@@ -377,7 +403,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                 self.aruco_size_m  # Aslengte
             )
 
-            self.get_logger().info(
+            self.get_logger().info(  # Log markerpositie
                 f'ArUco ID {marker_id}: x={float(tvec[0]):.3f} m, y={float(tvec[1]):.3f} m, z={float(tvec[2]):.3f} m'
             )
 
@@ -385,6 +411,117 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
         self.world_calibrated = False  # Geen juiste marker gevonden
         return frame, False  # Geef frame zonder geldige calibration terug
+
+    # =====================================================
+    # Validate ArUco Pose
+    # =====================================================
+
+    def accept_aruco_pose(self, rvec, tvec):
+        if self.last_valid_rvec is None or self.last_valid_tvec is None:  # Controleer of er nog geen vorige pose bestaat
+            self.last_valid_rvec = rvec.copy()  # Bewaar huidige rotatie als eerste geldige pose
+            self.last_valid_tvec = tvec.copy()  # Bewaar huidige translatie als eerste geldige pose
+            return True  # Accepteer eerste pose altijd
+
+        translation_jump = float(np.linalg.norm(tvec - self.last_valid_tvec))  # Bereken verschil in translatie
+        rotation_jump = float(np.linalg.norm(rvec - self.last_valid_rvec))  # Bereken verschil in rotatievector
+
+        if translation_jump > self.max_aruco_translation_jump_m:  # Controleer of translatie te veel springt
+            self.get_logger().warn(f"Rejected ArUco pose: translation jump {translation_jump:.3f} m")  # Log geweigerde translatie
+            return False  # Weiger deze ArUco-pose
+
+        if rotation_jump > self.max_aruco_rotation_jump_rad:  # Controleer of rotatie te veel springt
+            self.get_logger().warn(f"Rejected ArUco pose: rotation jump {rotation_jump:.3f} rad")  # Log geweigerde rotatie
+            return False  # Weiger deze ArUco-pose
+
+        self.last_valid_rvec = rvec.copy()  # Bewaar geaccepteerde rotatievector
+        self.last_valid_tvec = tvec.copy()  # Bewaar geaccepteerde translatievector
+        return True  # Accepteer deze ArUco-pose
+
+    # =====================================================
+    # Normalize Angle
+    # =====================================================
+
+    def normalize_angle_pi(self, angle):  # Normaliseer hoek naar bereik -pi tot +pi
+        while angle > math.pi:  # Controleer of hoek boven pi ligt
+            angle -= 2.0 * math.pi  # Trek volledige rotatie af
+        while angle <= -math.pi:  # Controleer of hoek onder of gelijk aan -pi ligt
+            angle += 2.0 * math.pi  # Tel volledige rotatie op
+        return angle  # Geef genormaliseerde hoek terug
+
+    # =====================================================
+    # Normalize Axis Yaw
+    # =====================================================
+
+    def normalize_axis_yaw(self, yaw):  # Normaliseer yaw als asrichting waarbij yaw en yaw+pi gelijkwaardig zijn
+        yaw = self.normalize_angle_pi(yaw)  # Breng yaw eerst naar -pi tot +pi
+        if yaw > math.pi / 2.0:  # Controleer of yaw boven +90 graden ligt
+            yaw -= math.pi  # Trek 180 graden af voor equivalente asrichting
+        if yaw <= -math.pi / 2.0:  # Controleer of yaw onder -90 graden ligt
+            yaw += math.pi  # Tel 180 graden op voor equivalente asrichting
+        return yaw  # Geef yaw terug binnen -90 tot +90 graden
+
+    # =====================================================
+    # Reprojection Error
+    # =====================================================
+
+    def calculate_reprojection_error(self, object_points, image_points, rvec, tvec):  # Bereken reprojection error van een pose
+        projected_points, _ = cv2.projectPoints(  # Projecteer 3D markerpunten terug naar beeldpunten
+            object_points,  # Gebruik markerpunten in markercoördinaten
+            rvec,  # Gebruik rotatievector van solvePnP
+            tvec,  # Gebruik translatievector van solvePnP
+            self.camera_matrix,  # Gebruik huidige cameramatrix
+            self.dist_coeffs  # Gebruik huidige distortioncoëfficiënten
+        )
+        projected_points = projected_points.reshape(-1, 2)  # Zet geprojecteerde punten naar Nx2-vorm
+        image_points = image_points.reshape(-1, 2)  # Zet gemeten beeldpunten naar Nx2-vorm
+        errors = np.linalg.norm(projected_points - image_points, axis=1)  # Bereken pixelafstand per hoek
+        mean_error = float(np.mean(errors))  # Bereken gemiddelde fout in pixels
+        return mean_error  # Geef gemiddelde reprojection error terug
+
+    # =====================================================
+    # Choose Best IPPE Pose
+    # =====================================================
+
+    def choose_best_ippe_pose(self, object_points, image_points):  # Kies de beste pose uit solvePnPGeneric IPPE-oplossingen
+        result = cv2.solvePnPGeneric(  # Bereken meerdere mogelijke poses voor vierkante marker
+            object_points,  # Gebruik 3D markerhoeken
+            image_points,  # Gebruik 2D markerhoeken
+            self.camera_matrix,  # Gebruik cameramatrix
+            self.dist_coeffs,  # Gebruik distortioncoëfficiënten
+            flags=cv2.SOLVEPNP_IPPE_SQUARE  # Gebruik IPPE-methode voor vierkante marker
+        )
+
+        success = bool(result[0])  # Lees successtatus uit resultaat
+        rvecs = result[1]  # Lees lijst met rotatievectoren
+        tvecs = result[2]  # Lees lijst met translatievectoren
+
+        if not success or len(rvecs) == 0:  # Controleer of er oplossingen zijn
+            return False, None, None, None  # Geef foutstatus terug
+
+        best_rvec = None  # Initialiseer beste rotatievector
+        best_tvec = None  # Initialiseer beste translatievector
+        best_error = None  # Initialiseer beste reprojection error
+
+        for rvec_candidate, tvec_candidate in zip(rvecs, tvecs):  # Loop door alle IPPE-oplossingen
+            if float(tvec_candidate[2]) <= 0.0:  # Controleer of marker voor de camera ligt
+                continue  # Sla oplossing achter de camera over
+
+            error = self.calculate_reprojection_error(  # Bereken reprojection error voor deze oplossing
+                object_points,  # Geef 3D markerpunten mee
+                image_points,  # Geef 2D markerpunten mee
+                rvec_candidate,  # Geef kandidaatrotatie mee
+                tvec_candidate  # Geef kandidaattranslatie mee
+            )
+
+            if best_error is None or error < best_error:  # Controleer of deze oplossing beter is
+                best_error = error  # Bewaar laagste fout
+                best_rvec = rvec_candidate.copy()  # Bewaar beste rotatievector
+                best_tvec = tvec_candidate.copy()  # Bewaar beste translatievector
+
+        if best_rvec is None or best_tvec is None:  # Controleer of er een geldige oplossing gevonden is
+            return False, None, None, None  # Geef foutstatus terug
+
+        return True, best_rvec, best_tvec, best_error  # Geef beste pose terug
 
     # =====================================================
     # ROI Depth To Camera XYZ
@@ -455,8 +592,12 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         covariance = np.cov(centered_points, rowvar=False)  # Bereken covariantiematrix
         eigenvalues, eigenvectors = np.linalg.eig(covariance)  # Bereken eigenwaarden en eigenvectoren
         principal_axis = eigenvectors[:, np.argmax(eigenvalues)]  # Kies hoofdas met grootste variantie
+        if float(principal_axis[0]) < 0.0:  # Controleer of PCA-as naar links wijst
+            principal_axis = -principal_axis  # Draai PCA-as om zodat de richting consistent naar rechts wijst
+
         yaw = math.atan2(float(principal_axis[1]), float(principal_axis[0]))  # Bereken beeldvlak-yaw
-        return yaw  # Geef yaw in radialen terug
+        yaw = self.normalize_axis_yaw(yaw)  # Normaliseer yaw als richtingloze as
+        return yaw  # Geef gestabiliseerde yaw in radialen terug
 
     # =====================================================
     # Image Yaw To World Yaw
@@ -476,7 +617,9 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         p2_y = ((y2_px - cy_camera) * z_m / fy)  # Bereken punt 2 camera-Y
         w1_x, w1_y, _ = self.transform_to_world(p1_x, p1_y, z_m)  # Transformeer punt 1 naar world
         w2_x, w2_y, _ = self.transform_to_world(p2_x, p2_y, z_m)  # Transformeer punt 2 naar world
-        return math.atan2(w2_y - w1_y, w2_x - w1_x)  # Bereken world-yaw
+        world_yaw = math.atan2(w2_y - w1_y, w2_x - w1_x)  # Bereken world-yaw
+        world_yaw = self.normalize_axis_yaw(world_yaw)  # Normaliseer world-yaw als richtingloze grijpas
+        return world_yaw  # Geef gestabiliseerde world-yaw terug
 
     # =====================================================
     # Process Frame To Objects
@@ -568,6 +711,11 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         nn_frame_packet, detection_packet, depth_packet = packet_result  # Pak packetset uit
         frame = nn_frame_packet.getCvFrame()  # Haal NN-frame op
         depth_frame = depth_packet.getFrame()  # Haal depthframe op
+
+        self.get_logger().info(f"NN frame shape: {frame.shape}")  # Log RGB/NN-frameformaat
+        self.get_logger().info(f"Depth frame shape: {depth_frame.shape}")  # Log depthframeformaat
+        self.get_logger().info(f"Raw detections: {len(detection_packet.detections)}")  # Log aantal ruwe YOLO-detecties
+
         frame, calibrated = self.estimate_aruco_pose(frame)  # Bepaal ArUco world pose
 
         if not calibrated:  # Controleer of world calibration gelukt is
@@ -672,40 +820,44 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def get_synced_packets(self, timeout_sec):
-        end_time = time.monotonic() + timeout_sec  # Bepaal timeouttijdstip
-        nn_frames = {}  # Buffer voor NN-frames
-        detections = {}  # Buffer voor detectiepakketten
-        depths = {}  # Buffer voor depthpakketten
-        latest_depth_packet = None  # Laatste depthpacket als fallback
+        end_time = time.monotonic() + timeout_sec  # Bepaal het eindtijdstip van de timeout
+        nn_frames = {}  # Maak buffer voor NN-frame packets
+        detections = {}  # Maak buffer voor detection packets
+        depths = {}  # Maak buffer voor depth packets
 
-        while time.monotonic() < end_time:  # Loop tot timeout
-            nn_frame_packet = self.nn_frame_queue.tryGet()  # Lees NN-frame packet
-            detection_packet = self.detection_queue.tryGet()  # Lees detection packet
-            depth_packet = self.depth_queue.tryGet()  # Lees depth packet
+        while time.monotonic() < end_time:  # Blijf zoeken tot de timeout verlopen is
+            nn_frame_packet = self.nn_frame_queue.tryGet()  # Probeer een NN-frame packet te lezen
+            detection_packet = self.detection_queue.tryGet()  # Probeer een detection packet te lezen
+            depth_packet = self.depth_queue.tryGet()  # Probeer een depth packet te lezen
 
-            if nn_frame_packet is not None:  # Controleer NN-frame
-                nn_frames[nn_frame_packet.getSequenceNum()] = nn_frame_packet  # Buffer NN-frame op sequence number
+            if nn_frame_packet is not None:  # Controleer of er een NN-frame is ontvangen
+                nn_sequence = nn_frame_packet.getSequenceNum()  # Lees sequence number van het NN-frame
+                nn_frames[nn_sequence] = nn_frame_packet  # Sla NN-frame op onder sequence number
                 self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
 
-            if detection_packet is not None:  # Controleer detection packet
-                detections[detection_packet.getSequenceNum()] = detection_packet  # Buffer detecties op sequence number
+            if detection_packet is not None:  # Controleer of er een detection packet is ontvangen
+                detection_sequence = detection_packet.getSequenceNum()  # Lees sequence number van detections
+                detections[detection_sequence] = detection_packet  # Sla detections op onder sequence number
 
-            if depth_packet is not None:  # Controleer depth packet
-                depths[depth_packet.getSequenceNum()] = depth_packet  # Buffer depth op sequence number
-                latest_depth_packet = depth_packet  # Update fallback depthpacket
+            if depth_packet is not None:  # Controleer of er een depth packet is ontvangen
+                depth_sequence = depth_packet.getSequenceNum()  # Lees sequence number van depth
+                depths[depth_sequence] = depth_packet  # Sla depth op onder sequence number
 
-            exact_sequences = set(nn_frames.keys()).intersection(detections.keys()).intersection(depths.keys())  # Zoek exacte match tussen frame/detecties/depth
-            if len(exact_sequences) > 0:  # Controleer of exacte match bestaat
-                sequence = max(exact_sequences)  # Gebruik nieuwste match
-                return (nn_frames[sequence], detections[sequence], depths[sequence])  # Geef exacte packetset terug
+            exact_sequences = set(nn_frames.keys()).intersection(detections.keys()).intersection(depths.keys())  # Zoek exact gelijke sequence numbers
 
-            frame_detection_sequences = set(nn_frames.keys()).intersection(detections.keys())  # Zoek frame/detectie match
-            if len(frame_detection_sequences) > 0 and latest_depth_packet is not None:  # Controleer fallback met laatste depth
-                sequence = max(frame_detection_sequences)  # Gebruik nieuwste frame/detectie match
-                return (nn_frames[sequence], detections[sequence], latest_depth_packet)  # Geef fallback packetset terug
+            if len(exact_sequences) > 0:  # Controleer of exacte synchronisatie bestaat
+                sequence = max(exact_sequences)  # Pak de nieuwste exacte sequence
+                self.get_logger().info(  # Log gebruikte sequence voor debug
+                    f"Synced packets sequence={sequence}, "
+                    f"nn={nn_frames[sequence].getSequenceNum()}, "
+                    f"det={detections[sequence].getSequenceNum()}, "
+                    f"depth={depths[sequence].getSequenceNum()}"
+                )
+                return (nn_frames[sequence], detections[sequence], depths[sequence])  # Geef exact gesynchroniseerde packets terug
 
-            time.sleep(0.005)  # Beperk CPU-belasting
+            time.sleep(0.005)  # Wacht kort om CPU-belasting te beperken
 
+        self.get_logger().warn("No exact synced NN/detection/depth packets found")  # Log dat exacte sync niet gevonden is
         return None  # Geef None terug bij timeout
 
     # =====================================================
@@ -733,8 +885,18 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
     def object_request_callback(self, request, response):
         with self.processing_lock:  # Blokkeer gelijktijdige objectaanvragen
-            if not self.running or self.device is None:  # Controleer camera actief
-                response.success = False  # Markeer response mislukt
+            if not self.running or self.device is None:  # Controleer of camera en device actief zijn
+                response.success = False  # Markeer response als mislukt
+                return response  # Geef response terug
+
+            if not USE_YOLO:  # Controleer of YOLO uit staat
+                self.get_logger().warn("Object request rejected: YOLO is disabled")  # Log dat objectdetectie niet beschikbaar is
+                response.success = False  # Markeer response als mislukt
+                return response  # Geef response terug
+
+            if self.nn_frame_queue is None or self.detection_queue is None or self.depth_queue is None:  # Controleer of alle benodigde queues bestaan
+                self.get_logger().warn("Object request rejected: required DepthAI queues are unavailable")  # Log ontbrekende queues
+                response.success = False  # Markeer response als mislukt
                 return response  # Geef response terug
 
             self.confidence_threshold = float(request.confidence_threshold)  # Lees confidencegrens uit request
@@ -742,12 +904,12 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             best_object = self.process_object_request(timeout_sec=2.0)  # Verwerk één objectaanvraag
 
             if best_object is None:  # Controleer of object gevonden is
-                response.success = False  # Markeer response mislukt
+                response.success = False  # Markeer response als mislukt
                 return response  # Geef response terug
 
             best_object_msg = self.convert_to_ros_msg(best_object)  # Converteer beste object naar ROS-message
             self.object_L6_pub.publish(best_object_msg)  # Publiceer beste object op debugtopic
-            response.success = True  # Markeer response geslaagd
+            response.success = True  # Markeer response als geslaagd
             response.object = best_object_msg  # Vul response objectveld
             return response  # Geef response terug
 
@@ -828,10 +990,10 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         msg.transform.transform.translation.y = float(obj["y"])  # Vul Y-positie
         msg.transform.transform.translation.z = float(obj["z"])  # Vul Z-positie
         yaw = float(obj["yaw"])  # Lees yawhoek
-        msg.transform.transform.rotation.x = 0.0  # Vul quaternion X
-        msg.transform.transform.rotation.y = 0.0  # Vul quaternion Y
-        msg.transform.transform.rotation.z = math.sin(yaw / 2.0)  # Vul quaternion Z uit yaw
-        msg.transform.transform.rotation.w = math.cos(yaw / 2.0)  # Vul quaternion W uit yaw
+        msg.transform.transform.rotation.x = 0.0
+        msg.transform.transform.rotation.y = 0.0
+        msg.transform.transform.rotation.z = yaw
+        msg.transform.transform.rotation.w = 0.0
         return msg  # Geef ObjectData message terug
 
     # =====================================================
@@ -951,6 +1113,8 @@ def main(args=None):
     except KeyboardInterrupt:
         pass  # Stop netjes bij Ctrl+C
     finally:
+        node.running = False  # Stop normale verwerking
+        node.watchdog_running = False  # Stop watchdogthread
         try:
             if node.device is not None:  # Controleer of device open is
                 node.device.close()  # Sluit DepthAI-device

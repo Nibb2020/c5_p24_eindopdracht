@@ -1,0 +1,20 @@
+{
+  "id": "2df45029-beb6-40fe-9aa4-def239783c1c",
+  "objects": [
+    {
+      "object_id": "8c107552-e5cf-4fc5-bdcf-69fa456ae38d",
+      "class_id": 3,
+      "class_name": "Smiley",
+      "confidence": 0.462890625,
+      "x": 0.5831137823273024,
+      "y": 0.6567163594281633,
+      "z": 0.17358345148642887,
+      "camera_x": 0.25398739376997054,
+      "camera_y": -0.2724395846613811,
+      "camera_z": 0.82,
+      "yaw": 3.01852219393821,
+      "image_yaw": -0.07849240132741402,
+      "robot_pickable": false
+    }
+  ]
+}

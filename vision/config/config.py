@@ -13,7 +13,7 @@ DEBUG_DRAW_ARUCO_LIVE = True  # True = ArUco tekenen in debugbeeld, False = live
 # ==================================================
 
 RGB_WIDTH = 640  # Breedte van RGB/NN-frame
-RGB_HEIGHT = 480  # Hoogte van RGB/NN-frame
+RGB_HEIGHT = 640  # Hoogte van RGB/NN-frame
 USB_SPEED = "HIGH"  # Gewenste USB-snelheid als tekstwaarde
 USE_DEVICE_CALIBRATION = False  # Gebruik OAK-D EEPROM-calibratie wanneer mogelijk
 
@@ -60,32 +60,30 @@ DATASET_FOLDER = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vi
 # ==================================================
 # Model
 # ==================================================
-
-MODEL_PATH = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/V0.1/best_openvino_2022.1_6shave.blob"  # Pad naar YOLO-model
+Version = "V0.5"
+MODEL_PATH = f"/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/{Version}/best_openvino_2022.1_3shave.blob"  # Pad naar YOLO-model
 
 # ==================================================
 # YOLO
 # ==================================================
 
-USE_YOLO = False                # Zet YOLO tijdelijk uit
-YOLO_NUM_CLASSES = 5            # Aantal YOLO-klassen
+USE_YOLO = True                 # Zet YOLO tijdelijk uit
+YOLO_NUM_CLASSES = 4            # Aantal YOLO-klassen
 YOLO_IOU_THRESHOLD = 0.5        # IOU threshold voor YOLO post-processing
 YOLO_DEFAULT_CONFIDENCE = 0.85  # Standaard confidencegrens
 
 YOLO_CLASS_MAPPING = {          # Mapping van klassenaam naar class-ID
-    "Hooi": 0,
-    "Kannon": 1,
-    "Schatkist Rood": 2,
-    "Krat": 3,
-    "Schatkist Blauw": 4,
+    "Bootje": 0,
+    "Dino": 1,
+    "Olifantje": 2,
+    "Smiley": 3,
 }
 
 YOLO_CLASS_NAMES = {  # Mapping van class-ID naar klassenaam
-    0: "Hooi",
-    1: "Kannon",
-    2: "Schatkist Rood",
-    3: "Krat",
-    4: "Schatkist Blauw",
+    0: "Bootje",
+    1: "Dino",
+    2: "Olifantje",
+    3: "Smiley",
 }
 
 # ==================================================
@@ -96,42 +94,42 @@ ARUCO_MARKER_ID = 0  # ID van de vaste world-reference marker
 ARUCO_SIZE_M = 0.07356  # Fysieke markermaat in meters
 ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50  # ArUco dictionary voor markerherkenning
 
+ARUCO_MAX_REPROJECTION_ERROR_PX = 3.0  # Maximale toegestane reprojection error voor ArUco-pose in pixels
+ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojection error en sprongen
+
 ARUCO_WORLD_X = 0.712       # World X-positie van markerorigin
 ARUCO_WORLD_Y = 0.277       # World Y-positie van markerorigin
-ARUCO_WORLD_Z = 0.0668      # World Z-positie van markerorigin
+ARUCO_WORLD_Z = 0.0      # World Z-positie van markerorigin
 
-CAMERA_MATRIX = np.array(   # Fallback cameramatrix wanneer EEPROM-calibratie faalt
-    [  
-        [685.91085044, 0.0, 328.86861324],
-        [0.0, 685.66076641, 238.30004321],
-        [0.0, 0.0, 1.0]
-    ],
-    dtype=np.float64
-)
+CAMERA_MATRIX = np.array([
+    [919.80036341, 0.00000000, 321.10036797],
+    [0.00000000, 918.88387367, 311.29307596],
+    [0.00000000, 0.00000000, 1.00000000],
+], dtype=np.float32)
 
-DIST_COEFFS = np.array([0.1320767083, -0.5980778233, 0.0004245213, 0.0050993227, 1.7357764903], dtype=np.float32)  # Fallback distortioncoëfficiënten
+DIST_COEFFS = np.array([0.1502961560, -0.9671998692, -0.0037365286, 0.0022325322, 3.8777281358], dtype=np.float32)
 
-ARUCO_TO_ROBOT_ROTATION = np.array(  # Rotatie van ArUco-frame naar robot-base-frame
+ARUCO_TO_ROBOT_ROTATION = np.array(
     [
         [0.0, 1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
     ],
-    dtype=np.float64  # Gebruik float64 voor stabiele matrixberekeningen
+    dtype=np.float64
 )
 
 # ==================================================
 # Robot Filtering
 # ==================================================
 
-ROBOT_FILTER_ENABLED = True  # Schakel robotfiltering aan of uit
-ROBOT_ALLOWED_CLASS_IDS = [0, 1, 2, 3, 4]  # Klasses die robot mag oppakken
+ROBOT_FILTER_ENABLED = False  # Schakel robotfiltering aan of uit
+ROBOT_ALLOWED_CLASS_IDS = [0, 1, 2, 3,]  # Klasses die robot mag oppakken
 
-ROBOT_MIN_X_M = 0.125   # Minimum world-X voor robotbereik
-ROBOT_MAX_X_M = 0.383    # Maximum world-X voor robotbereik
-ROBOT_MIN_Y_M = 0.0625   # Minimum world-Y voor robotbereik
-ROBOT_MAX_Y_M = 0.2768    # Maximum world-Y voor robotbereik
+ROBOT_MIN_X_M = 0.736   # Minimum world-X voor robotbereik
+ROBOT_MAX_X_M = 0.855    # Maximum world-X voor robotbereik
+ROBOT_MIN_Y_M = 0.2520   # Minimum world-Y voor robotbereik
+ROBOT_MAX_Y_M = 0.4875    # Maximum world-Y voor robotbereik
 ROBOT_MIN_Z_M = 0.0883   # Minimum world-Z voor robotbereik
-ROBOT_MAX_Z_M = 0.1033    # Maximum world-Z voor robotbereik
+ROBOT_MAX_Z_M = 0.12    # Maximum world-Z voor robotbereik
 
 ROBOT_MIN_CONFIDENCE = 0.85  # Minimum confidence voor robotselectie
