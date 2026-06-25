@@ -122,6 +122,7 @@ class manipulatorController(Node):
         response.succes = True
         return response
 
+    #Geeft status door
     def _run_process(self):
         try:
             self.publish_status("Initialisatie...")
@@ -160,10 +161,6 @@ class manipulatorController(Node):
 
     #echte logica
     def execute_app(self):
-        self.move_to_state("home")
-        if self.home_is_requested():
-            return
-
         self.move_to_pose_offset(   self.yaw_rotation)
         if self.home_is_requested():
             return
@@ -254,7 +251,7 @@ class manipulatorController(Node):
 
         self.move_to_state("up")
 
-
+#vacuum gripper node
 class VacuumGripper(Node):
     def __init__(self):
         super().__init__('vacuum_gripper')

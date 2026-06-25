@@ -1,0 +1,4 @@
+float32 confidence_threshold  # Minimale confidence voor de objectaanvraag
+---
+bool success  # Geeft aan of er een geldig object gevonden is
+project_interfaces/ObjectData object  # Beste object uit de aanvraag

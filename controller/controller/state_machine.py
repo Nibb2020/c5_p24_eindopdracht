@@ -12,10 +12,11 @@ from rclpy.task import Future
 from std_msgs.msg import Bool, String
 from std_srvs.srv import SetBool, Trigger
 
-from project_interfaces.srv import Manipulator, VoorwerpData
+from project_interfaces.srv import Manipulator, GetObjectData
 from xarm_msgs.msg import RobotMsg
 
 
+# Mogelijke toestanden van de centrale controller
 class State(Enum):
     STARTING = "starting"
     STANDBY = "stand-by"
@@ -31,8 +32,10 @@ class RobotController(Node):
     def __init__(self) -> None:
         super().__init__("robot_controller")
 
+        # Reentrant callbacks zijn nodig omdat services en statusberichten elkaar kunnen overlappen
         self.callback_group = ReentrantCallbackGroup()
 
+        # ================= STATE =================
         self.current_state = State.STARTING
         self.previous_state = State.STARTING
 
@@ -47,6 +50,7 @@ class RobotController(Node):
 
         self.emergency_stop_detected = False
 
+        # Houdt bij welke asynchrone aanvragen momenteel actief zijn
         self.vision_request_active = False
         self.manipulator_request_active = False
         self.move_home_requested = False
@@ -54,8 +58,10 @@ class RobotController(Node):
         self.reset_request_active = False
         self.robot_ready_after_reset = False
 
+        # Maakt oude callbacks ongeldig nadat een fout of reset optreedt
         self.operation_generation = 0
 
+        # Resetstatus
         self.waiting_for_restart_response = False
         self.waiting_for_robot_ready = False
         self.waiting_for_reset_home = False
@@ -68,128 +74,53 @@ class RobotController(Node):
 
         self.latest_robot_ready = False
 
+        # Services moeten meerdere cycli achter elkaar beschikbaar zijn voordat STARTING eindigt
         self.startup_ready_counter = 0
         self.startup_ready_required = 10
 
         self.reset_home_service_counter = 0
         self.reset_home_service_required = 10
-
         self.reset_home_command_sent = False
 
+        # Confidence die naar de vision-service wordt gestuurd
         self.declare_parameter("vision_confidence", 0.7)
 
-        self.state_publisher = self.create_publisher(
-            String,
-            "/controller/state",
-            10,
-        )
+        # ================= ROS2 CONFIGURATIE =================
+        # Publishers naar de gebruikersinterface
+        self.state_publisher = self.create_publisher(String, "/controller/state", 10)
+        self.warning_publisher = self.create_publisher(String, "/controller/warning", 10)
+        self.error_publisher = self.create_publisher(String, "/controller/error", 10)
+        self.emergency_publisher = self.create_publisher(Bool, "/controller/emergency_stop", 10)
 
-        self.warning_publisher = self.create_publisher(
-            String,
-            "/controller/warning",
-            10,
-        )
+        # Subscribers
+        self.start_subscription = self.create_subscription(Bool, "/ui/start_stop", self.start_callback, 10, callback_group=self.callback_group)
+        self.manipulator_status_subscription = self.create_subscription(String, "/manipulator/status", self.manipulator_status_callback, 10, callback_group=self.callback_group)
+        self.robot_state_subscription = self.create_subscription(RobotMsg, "/xarm/robot_states", self.robot_state_callback, 10, callback_group=self.callback_group)
 
-        self.error_publisher = self.create_publisher(
-            String,
-            "/controller/error",
-            10,
-        )
+        # Clients voor vision, manipulatie, home en systeemreset
+        self.vision_client = self.create_client(GetObjectData, "/vision/voorwerp_data", callback_group=self.callback_group)
+        self.manipulator_client = self.create_client(Manipulator, "/manipulator/start", callback_group=self.callback_group)
+        self.move_home_client = self.create_client(Trigger, "/manipulator/move_home", callback_group=self.callback_group)
+        self.supervisor_restart_client = self.create_client(Trigger, "/system_supervisor/restart", callback_group=self.callback_group)
 
-        self.emergency_publisher = self.create_publisher(
-            Bool,
-            "/controller/emergency_stop",
-            10,
-        )
+        # Services die door de gebruikersinterface worden aangeroepen
+        self.reset_service = self.create_service(Trigger, "/ui/reset_error", self.reset_error_callback, callback_group=self.callback_group)
+        self.move_home_service = self.create_service(Trigger, "/ui/move_home", self.move_home_ui_callback, callback_group=self.callback_group)
+        self.training_service = self.create_service(SetBool, "/ui/training_mode", self.training_mode_callback, callback_group=self.callback_group)
+        self.retry_service = self.create_service(Trigger, "/ui/retry", self.retry_callback, callback_group=self.callback_group)
 
-        self.start_subscription = self.create_subscription(
-            Bool,
-            "/ui/start_stop",
-            self.start_callback,
-            10,
-            callback_group=self.callback_group,
-        )
-
-        self.manipulator_status_subscription = self.create_subscription(
-            String,
-            "/manipulator/status",
-            self.manipulator_status_callback,
-            10,
-            callback_group=self.callback_group,
-        )
-
-        self.robot_state_subscription = self.create_subscription(
-            RobotMsg,
-            "/xarm/robot_states",
-            self.robot_state_callback,
-            10,
-            callback_group=self.callback_group,
-        )
-
-        self.vision_client = self.create_client(
-            VoorwerpData,
-            "/vision/voorwerp_data",
-            callback_group=self.callback_group,
-        )
-
-        self.manipulator_client = self.create_client(
-            Manipulator,
-            "/manipulator/start",
-            callback_group=self.callback_group,
-        )
-
-        # Change this name/type if your manipulator uses another service.
-        self.move_home_client = self.create_client(
-            Trigger,
-            "/manipulator/move_home",
-            callback_group=self.callback_group,
-        )
-
-        self.supervisor_restart_client = self.create_client(
-            Trigger,
-            "/system_supervisor/restart",
-            callback_group=self.callback_group,
-        )
-
-        self.reset_service = self.create_service(
-            Trigger,
-            "/ui/reset_error",
-            self.reset_error_callback,
-            callback_group=self.callback_group,
-        )
-
-        self.move_home_service = self.create_service(
-            Trigger,
-            "/ui/move_home",
-            self.move_home_ui_callback,
-            callback_group=self.callback_group,
-        )
-
-        self.training_service = self.create_service(
-            SetBool,
-            "/ui/training_mode",
-            self.training_mode_callback,
-            callback_group=self.callback_group,
-        )
-
-        self.retry_service = self.create_service(
-            Trigger,
-            "/ui/retry",
-            self.retry_callback,
-            callback_group=self.callback_group,
-        )
-
-        self.state_timer = self.create_timer(
-            0.1,
-            self.state_machine_loop,
-            callback_group=self.callback_group,
-        )
+        # De state machine wordt iedere 0,1 seconde gecontroleerd
+        self.state_timer = self.create_timer(0.1, self.state_machine_loop, callback_group=self.callback_group)
 
         self.publish_all_ui_data()
         self.get_logger().info("Robot controller started in stand-by")
 
+    # =====================================================
+    # HOOFDLOGICA VAN DE STATE MACHINE
+    # =====================================================
 
     def state_machine_loop(self) -> None:
+        # Tijdens STARTING wordt gewacht op de robot en alle benodigde services
         if self.current_state == State.STARTING:
             services_ready = (
                 self.vision_client.service_is_ready()
@@ -200,52 +131,36 @@ class RobotController(Node):
             if self.latest_robot_ready and services_ready:
                 self.startup_ready_counter += 1
 
-                if (
-                    self.startup_ready_counter
-                    >= self.startup_ready_required
-                ):
+                if self.startup_ready_counter >= self.startup_ready_required:
                     self.startup_ready_counter = 0
                     self.change_state(State.STANDBY)
-
-                    self.get_logger().info(
-                        "Robot, vision and manipulator are ready"
-                    )
+                    self.get_logger().info("Robot, vision and manipulator are ready")
             else:
                 self.startup_ready_counter = 0
 
             return
 
+        # Tijdens RESETTING wordt gewacht tot de robot klaar is en daarna naar home is gegaan
         if self.current_state == State.RESETTING:
-            if (
-                self.waiting_for_robot_ready
-                or self.waiting_for_reset_home
-            ):
+            if self.waiting_for_robot_ready or self.waiting_for_reset_home:
                 self.reset_wait_counter += 1
 
                 if self.reset_wait_counter >= self.reset_wait_limit:
-                    self.reset_failed(
-                        "Reset timed out while waiting for the robot "
-                        "or home movement"
-                    )
+                    self.reset_failed("Reset timed out while waiting for the robot or home movement")
                     return
 
-            if (
-                self.waiting_for_robot_ready
-                and self.robot_ready_after_reset
-            ):
+            if self.waiting_for_robot_ready and self.robot_ready_after_reset:
                 if self.move_home_client.service_is_ready():
                     self.reset_home_service_counter += 1
 
-                    if (
-                        self.reset_home_service_counter
-                        >= self.reset_home_service_required
-                    ):
+                    if self.reset_home_service_counter >= self.reset_home_service_required:
                         self.start_reset_home()
                 else:
                     self.reset_home_service_counter = 0
 
             return
 
+        # Deze toestanden worden door callbacks afgehandeld
         if self.current_state in (
             State.ERROR,
             State.TRAINING_INFERENCE,
@@ -255,37 +170,31 @@ class RobotController(Node):
         ):
             return
 
-        if (
-            self.current_state == State.STANDBY
-            and self.run_enabled
-        ):
+        # Start een nieuwe sorteercyclus wanneer automatisch draaien aanstaat
+        if self.current_state == State.STANDBY and self.run_enabled:
             self.change_state(State.RUN_VISION)
             self.start_vision()
 
+    # =====================================================
+    # START/STOP EN VISION
+    # =====================================================
+
     def start_callback(self, message: Bool) -> None:
         if message.data and self.run_once:
-            self.get_logger().warning(
-                "Automatic operation cannot start while "
-                "a one-cycle retry is active"
-            )
+            self.get_logger().warning("Automatic operation cannot start while a one-cycle retry is active")
             return
 
         self.run_enabled = message.data
 
         if self.run_enabled:
-            self.get_logger().info(
-                "Automatic operation enabled"
-            )
+            self.get_logger().info("Automatic operation enabled")
         else:
-            self.get_logger().info(
-                "Stop requested. Current cycle will finish."
-            )
+            self.get_logger().info("Stop requested. Current cycle will finish.")
 
     def start_vision(self) -> None:
-        if self.current_state != State.RUN_VISION:
+        if self.current_state != State.RUN_VISION or self.vision_request_active:
             return
-        if self.vision_request_active:
-            return
+
         if not self.vision_client.service_is_ready():
             self.enter_error("Vision service is unavailable")
             return
@@ -293,27 +202,17 @@ class RobotController(Node):
         self.vision_request_active = True
         generation = self.operation_generation
 
-        request = VoorwerpData.Request()
-        request.confidence = float(self.get_parameter("vision_confidence").value)
+        request = GetObjectData.Request()
+        request.confidence_threshold = float(self.get_parameter("vision_confidence").value)
 
         future = self.vision_client.call_async(request)
-        future.add_done_callback(
-            lambda completed_future: self.vision_response_callback(
-                completed_future,
-                generation,
-            )
-        )
+        future.add_done_callback(lambda completed_future: self.vision_response_callback(completed_future, generation))
 
-    def vision_response_callback(
-        self,
-        future: Future,
-        generation: int,
-    ) -> None:
+    def vision_response_callback(self, future: Future, generation: int) -> None:
         self.vision_request_active = False
 
-        if generation != self.operation_generation:
-            return
-        if self.current_state != State.RUN_VISION:
+        # Negeer antwoorden van een oude cyclus na een fout of reset
+        if generation != self.operation_generation or self.current_state != State.RUN_VISION:
             return
 
         try:
@@ -322,33 +221,38 @@ class RobotController(Node):
             self.enter_error(f"Vision service failed: {exception}")
             return
 
-        klasse = response.klasse.strip()
-        translation = list(response.translation)
-        rotation = float(response.rotation)
+        if not response.success:
+            self.enter_error("Vision found no valid object")
+            return
+
+        # TransformStamped bevat zelf opnieuw een veld met de naam transform
+        klasse = response.object.object_class.strip()
+        translation = [
+            float(response.object.transform.transform.translation.x),
+            float(response.object.transform.transform.translation.y),
+            float(response.object.transform.transform.translation.z),
+        ]
+
+        # In dit project bevat rotation.z direct de gewenste yaw
+        yaw = float(response.object.transform.transform.rotation.z)
 
         if not klasse:
             self.enter_error("Vision returned no object class")
             return
 
-        if len(translation) != 3:
-            self.enter_error(
-                "Vision translation must contain x, y and z"
-            )
-            return
+        self.get_logger().info(f"Vision result: klasse={klasse}, translation={translation}, yaw={yaw}")
 
         self.change_state(State.RUN_MANIPULATOR)
-        self.start_manipulator(klasse, translation, rotation)
+        self.start_manipulator(klasse, translation, yaw)
 
-    def start_manipulator(
-        self,
-        klasse: str,
-        translation: list[float],
-        rotation: float,
-    ) -> None:
-        if self.current_state != State.RUN_MANIPULATOR:
+    # =====================================================
+    # MANIPULATOR
+    # =====================================================
+
+    def start_manipulator(self, klasse: str, translation: list[float], rotation: float) -> None:
+        if self.current_state != State.RUN_MANIPULATOR or self.manipulator_request_active:
             return
-        if self.manipulator_request_active:
-            return
+
         if not self.manipulator_client.service_is_ready():
             self.enter_error("Manipulator service is unavailable")
             return
@@ -362,23 +266,12 @@ class RobotController(Node):
         request.rotation = rotation
 
         future = self.manipulator_client.call_async(request)
-        future.add_done_callback(
-            lambda completed_future: self.manipulator_response_callback(
-                completed_future,
-                generation,
-            )
-        )
+        future.add_done_callback(lambda completed_future: self.manipulator_response_callback(completed_future, generation))
 
-    def manipulator_response_callback(
-        self,
-        future: Future,
-        generation: int,
-    ) -> None:
+    def manipulator_response_callback(self, future: Future, generation: int) -> None:
         self.manipulator_request_active = False
 
-        if generation != self.operation_generation:
-            return
-        if self.current_state != State.RUN_MANIPULATOR:
+        if generation != self.operation_generation or self.current_state != State.RUN_MANIPULATOR:
             return
 
         try:
@@ -391,40 +284,28 @@ class RobotController(Node):
             self.enter_error("Manipulator rejected the request")
             return
 
-        self.get_logger().info(
-            "Manipulator started. Waiting for status 'klaar'."
-        )
+        self.get_logger().info("Manipulator started. Waiting for status 'klaar'.")
 
-    def move_home_ui_callback(
-        self,
-        request: Trigger.Request,
-        response: Trigger.Response,
-    ) -> Trigger.Response:
+    # =====================================================
+    # MOVE HOME
+    # =====================================================
+
+    def move_home_ui_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
 
-        if self.current_state not in (
-            State.STANDBY,
-            State.RUN_VISION,
-            State.RUN_MANIPULATOR,
-        ):
+        if self.current_state not in (State.STANDBY, State.RUN_VISION, State.RUN_MANIPULATOR):
             response.success = False
-            response.message = (
-                "Move home is not allowed in the current state"
-            )
+            response.message = "Move home is not allowed in the current state"
             return response
 
         if self.home_request_active:
             response.success = False
-            response.message = (
-                "A move-home request is already active"
-            )
+            response.message = "A move-home request is already active"
             return response
 
         if not self.move_home_client.service_is_ready():
             response.success = False
-            response.message = (
-                "Manipulator move-home service is unavailable"
-            )
+            response.message = "Manipulator move-home service is unavailable"
             return response
 
         self.run_enabled = False
@@ -435,34 +316,34 @@ class RobotController(Node):
         self.request_move_home(for_reset=False)
 
         response.success = True
-        response.message = (
-            "Move-home request accepted. "
-            "The robot will move home after the current planned move."
-        )
+        response.message = "Move-home request accepted. The robot will move home after the current planned move."
         return response
 
     def request_move_home(self, for_reset: bool) -> None:
         if self.home_request_active:
             message = "A move-home request is already active"
+
             if for_reset:
                 self.reset_failed(message)
             else:
                 self.enter_error(message)
+
             return
 
         if not self.move_home_client.service_is_ready():
             message = "Manipulator move-home service is unavailable"
+
             if for_reset:
                 self.reset_failed(message)
             else:
                 self.enter_error(message)
+
             return
 
         self.home_request_active = True
         generation = self.operation_generation
 
-        request = Trigger.Request()
-        future = self.move_home_client.call_async(request)
+        future = self.move_home_client.call_async(Trigger.Request())
         future.add_done_callback(
             lambda completed_future: self.move_home_response_callback(
                 completed_future,
@@ -473,17 +354,14 @@ class RobotController(Node):
 
         self.get_logger().info("Move-home request sent to manipulator")
 
-    def move_home_response_callback(self,future: Future,generation: int,for_reset: bool,) -> None:
+    def move_home_response_callback(self, future: Future, generation: int, for_reset: bool) -> None:
         self.home_request_active = False
 
         if generation != self.operation_generation:
             return
 
         if for_reset:
-            if (
-                self.current_state != State.RESETTING
-                or not self.waiting_for_reset_home
-            ):
+            if self.current_state != State.RESETTING or not self.waiting_for_reset_home:
                 return
         elif self.current_state != State.MOVING_HOME:
             return
@@ -492,35 +370,28 @@ class RobotController(Node):
             response = future.result()
         except Exception as exception:
             if for_reset:
-                self.reset_failed(
-                    f"Move-home service failed: {exception}"
-                )
+                self.reset_failed(f"Move-home service failed: {exception}")
             else:
-                self.enter_error(
-                    f"Move-home service failed: {exception}"
-                )
+                self.enter_error(f"Move-home service failed: {exception}")
             return
 
         if not response.success:
-            message = (
-                response.message
-                or "Manipulator rejected the move-home request"
-            )
+            message = response.message or "Manipulator rejected the move-home request"
 
             if for_reset:
                 self.reset_failed(message)
             else:
                 self.enter_error(message)
+
             return
 
-        self.get_logger().info(
-            "Move home started. Waiting for status 'Home_klaar'."
-        )
+        self.get_logger().info("Move home started. Waiting for status 'Home_klaar'.")
 
-    def manipulator_status_callback(
-        self,
-        message: String,
-    ) -> None:
+    # =====================================================
+    # STATUSBERICHTEN VAN DE MANIPULATOR
+    # =====================================================
+
+    def manipulator_status_callback(self, message: String) -> None:
         status = message.data.strip()
         status_lower = status.casefold()
 
@@ -529,8 +400,7 @@ class RobotController(Node):
 
         self.get_logger().info(
             "Manipulator status received: "
-            f"{status!r}, "
-            f"controller_state={self.current_state.value}, "
+            f"{status!r}, controller_state={self.current_state.value}, "
             f"move_home_requested={self.move_home_requested}, "
             f"waiting_for_reset_home={self.waiting_for_reset_home}, "
             f"reset_home_command_sent={self.reset_home_command_sent}"
@@ -541,64 +411,42 @@ class RobotController(Node):
                 self.reset_failed(status)
             else:
                 self.enter_error(status)
-
             return
 
+        # 'Klaar' betekent dat een normale sorteercyclus klaar is
         if status_lower == "klaar":
             if self.current_state == State.RUN_MANIPULATOR:
-                self.get_logger().info(
-                    "Manipulator sorting operation completed"
-                )
+                self.get_logger().info("Manipulator sorting operation completed")
 
                 if self.run_once:
-                    self.get_logger().info(
-                        "One-cycle retry completed"
-                    )
-
+                    self.get_logger().info("One-cycle retry completed")
                     self.run_once = False
                     self.run_enabled = False
-
-                    self.change_state(
-                        State.TRAINING_INFERENCE
-                    )
+                    self.change_state(State.TRAINING_INFERENCE)
                     return
 
                 self.change_state(State.STANDBY)
                 return
 
             if self.current_state == State.MOVING_HOME:
-                self.get_logger().info(
-                    "Current sorting movement completed. "
-                    "Waiting for Home_klaar."
-                )
+                self.get_logger().info("Current sorting movement completed. Waiting for Home_klaar.")
                 return
 
-            self.get_logger().warning(
-                f"Ignoring Klaar in state {self.current_state.value}"
-            )
+            self.get_logger().warning(f"Ignoring Klaar in state {self.current_state.value}")
             return
 
-
+        # 'Home_klaar' wordt gebruikt voor een handmatige home-opdracht en tijdens reset
         if status_lower == "home_klaar":
-            if (
-                self.current_state == State.RESETTING
-                and self.waiting_for_reset_home
-            ):
-                self.get_logger().info(
-                    "Reset move-home operation completed"
-                )
+            if self.current_state == State.RESETTING and self.waiting_for_reset_home:
+                self.get_logger().info("Reset move-home operation completed")
                 self.complete_reset()
                 return
 
             if self.move_home_requested:
-                self.get_logger().info(
-                    "Requested move-home operation completed"
-                )
-
+                self.get_logger().info("Requested move-home operation completed")
                 self.move_home_requested = False
                 self.home_request_active = False
                 self.run_enabled = False
-
                 self.change_state(State.STANDBY)
                 return
 
@@ -606,32 +454,27 @@ class RobotController(Node):
                 "Home_klaar received without an active "
                 f"home request. Current state: {self.current_state.value}"
             )
-            return
-        
-    def retry_callback(self,request: Trigger.Request,response: Trigger.Response,) -> Trigger.Response:
+
+    # =====================================================
+    # TRAINING EN RETRY
+    # =====================================================
+
+    def retry_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
 
         if self.current_state != State.TRAINING_INFERENCE:
             response.success = False
-            response.message = (
-                "Retry is only allowed while the controller "
-                "is in training/inference mode"
-            )
+            response.message = "Retry is only allowed while the controller is in training/inference mode"
             return response
 
         if self.run_enabled:
             response.success = False
-            response.message = (
-                "Retry cannot start while automatic operation "
-                "is enabled"
-            )
+            response.message = "Retry cannot start while automatic operation is enabled"
             return response
 
         if self.run_once:
             response.success = False
-            response.message = (
-                "A one-cycle retry is already active"
-            )
+            response.message = "A one-cycle retry is already active"
             return response
 
         if not self.vision_client.service_is_ready():
@@ -647,18 +490,45 @@ class RobotController(Node):
         self.run_enabled = False
         self.run_once = True
 
-        self.get_logger().info(
-            "One-cycle retry requested"
-        )
+        self.get_logger().info("One-cycle retry requested")
 
         self.change_state(State.RUN_VISION)
         self.start_vision()
 
         response.success = True
-        response.message = (
-            "Retry accepted. One sorting cycle will run."
-        )
+        response.message = "Retry accepted. One sorting cycle will run."
         return response
+
+    def training_mode_callback(self, request: SetBool.Request, response: SetBool.Response) -> SetBool.Response:
+        if request.data:
+            if self.current_state != State.STANDBY:
+                response.success = False
+                response.message = "Training mode can only start from stand-by"
+                return response
+
+            if self.run_enabled:
+                response.success = False
+                response.message = "Stop automatic operation before starting training mode"
+                return response
+
+            self.change_state(State.TRAINING_INFERENCE)
+            response.success = True
+            response.message = "Training mode started"
+            return response
+
+        if self.current_state != State.TRAINING_INFERENCE:
+            response.success = False
+            response.message = "Training mode is not active"
+            return response
+
+        self.change_state(State.STANDBY)
+        response.success = True
+        response.message = "Training mode stopped"
+        return response
+
+    # =====================================================
+    # ROBOTSTATUS EN NOODSTOP
+    # =====================================================
 
     @staticmethod
     def is_emergency_condition(message: RobotMsg) -> bool:
@@ -677,10 +547,11 @@ class RobotController(Node):
             and message.mt_brake == 63
             and message.mt_able == 63
         )
-    
+
     def robot_state_callback(self, message: RobotMsg) -> None:
         self.latest_robot_ready = self.is_robot_ready(message)
 
+        # Tijdens reset wordt alleen bijgehouden of de robot meerdere berichten achter elkaar klaar is
         if self.current_state == State.RESETTING:
             if not self.waiting_for_robot_ready:
                 return
@@ -688,14 +559,9 @@ class RobotController(Node):
             if self.latest_robot_ready:
                 self.reset_ready_counter += 1
 
-                if (
-                    self.reset_ready_counter
-                    >= self.reset_ready_required
-                ):
+                if self.reset_ready_counter >= self.reset_ready_required:
                     if not self.robot_ready_after_reset:
-                        self.get_logger().info(
-                            "Robot ready state confirmed after reset"
-                        )
+                        self.get_logger().info("Robot ready state confirmed after reset")
 
                     self.robot_ready_after_reset = True
             else:
@@ -709,27 +575,25 @@ class RobotController(Node):
                 self.emergency_stop_detected = True
                 self.publish_emergency_stop()
                 self.enter_error("Emergency stop activated")
-
             return
 
         if self.current_state == State.ERROR:
             return
 
         if message.err != 0:
-            self.enter_error(
-                f"xArm error code: {message.err}"
-            )
+            self.enter_error(f"xArm error code: {message.err}")
             return
 
         if message.warn != 0:
-            self.set_warning(
-                f"xArm warning code: {message.warn}"
-            )
+            self.set_warning(f"xArm warning code: {message.warn}")
         else:
             self.clear_warning()
 
+    # =====================================================
+    # RESET
+    # =====================================================
 
-    def reset_error_callback(self,request: Trigger.Request,response: Trigger.Response,) -> Trigger.Response:
+    def reset_error_callback(self, request: Trigger.Request, response: Trigger.Response) -> Trigger.Response:
         del request
 
         if self.current_state != State.ERROR:
@@ -752,6 +616,7 @@ class RobotController(Node):
         self.reset_request_active = True
         self.operation_generation += 1
 
+        # Maak alle lopende aanvragen ongeldig en begin met een schone resetstatus
         self.vision_request_active = False
         self.manipulator_request_active = False
         self.home_request_active = False
@@ -763,19 +628,15 @@ class RobotController(Node):
         self.robot_ready_after_reset = False
         self.reset_home_command_sent = False
         self.reset_home_service_counter = 0
-
         self.reset_ready_counter = 0
         self.reset_wait_counter = 0
 
         self.change_state(State.RESETTING)
 
         generation = self.operation_generation
-        future = self.supervisor_restart_client.call_async(
-            Trigger.Request()
-        )
+        future = self.supervisor_restart_client.call_async(Trigger.Request())
         future.add_done_callback(
-            lambda completed_future:
-            self.supervisor_restart_response_callback(
+            lambda completed_future: self.supervisor_restart_response_callback(
                 completed_future,
                 generation,
             )
@@ -785,14 +646,8 @@ class RobotController(Node):
         response.message = "System reset started"
         return response
 
-    def supervisor_restart_response_callback(
-        self,
-        future: Future,
-        generation: int,
-    ) -> None:
-        if generation != self.operation_generation:
-            return
-        if self.current_state != State.RESETTING:
+    def supervisor_restart_response_callback(self, future: Future, generation: int) -> None:
+        if generation != self.operation_generation or self.current_state != State.RESETTING:
             return
 
         self.waiting_for_restart_response = False
@@ -800,52 +655,37 @@ class RobotController(Node):
         try:
             response = future.result()
         except Exception as exception:
-            self.reset_failed(
-                f"Supervisor restart failed: {exception}"
-            )
+            self.reset_failed(f"Supervisor restart failed: {exception}")
             return
 
         if not response.success:
-            self.reset_failed(
-                response.message or "System restart failed"
-            )
+            self.reset_failed(response.message or "System restart failed")
             return
 
         self.waiting_for_robot_ready = True
         self.reset_ready_counter = 0
         self.reset_wait_counter = 0
 
-        self.get_logger().info(
-            "Processes restarted. Waiting for the robot to report ready."
-        )
+        self.get_logger().info("Processes restarted. Waiting for the robot to report ready.")
 
     def start_reset_home(self) -> None:
         if self.current_state != State.RESETTING:
             return
-
         if not self.waiting_for_robot_ready:
             return
-
         if not self.robot_ready_after_reset:
             return
-
         if not self.move_home_client.service_is_ready():
             return
 
         self.waiting_for_robot_ready = False
         self.waiting_for_reset_home = True
-
         self.reset_home_command_sent = True
         self.reset_home_service_counter = 0
-
         self.reset_ready_counter = 0
         self.reset_wait_counter = 0
 
-        self.get_logger().info(
-            "Robot and manipulator are ready. "
-            "Moving home before completing reset."
-        )
-
+        self.get_logger().info("Robot and manipulator are ready. Moving home before completing reset.")
         self.request_move_home(for_reset=True)
 
     def complete_reset(self) -> None:
@@ -865,6 +705,7 @@ class RobotController(Node):
         self.reset_ready_counter = 0
         self.reset_wait_counter = 0
 
+        # Wis alle meldingen nadat robot en manipulator weer klaar zijn
         self.emergency_stop_detected = False
         self.error_active = False
         self.error_message = ""
@@ -877,9 +718,7 @@ class RobotController(Node):
         self.publish_warning()
 
         self.change_state(State.STANDBY)
-        self.get_logger().info(
-            "System reset completed and robot is home"
-        )
+        self.get_logger().info("System reset completed and robot is home")
 
     def reset_failed(self, message: str) -> None:
         self.run_once = False
@@ -903,41 +742,9 @@ class RobotController(Node):
         self.publish_error()
         self.get_logger().error(message)
 
-    def training_mode_callback(
-        self,
-        request: SetBool.Request,
-        response: SetBool.Response,
-    ) -> SetBool.Response:
-        if request.data:
-            if self.current_state != State.STANDBY:
-                response.success = False
-                response.message = (
-                    "Training mode can only start from stand-by"
-                )
-                return response
-
-            if self.run_enabled:
-                response.success = False
-                response.message = (
-                    "Stop automatic operation before starting "
-                    "training mode"
-                )
-                return response
-
-            self.change_state(State.TRAINING_INFERENCE)
-            response.success = True
-            response.message = "Training mode started"
-            return response
-
-        if self.current_state != State.TRAINING_INFERENCE:
-            response.success = False
-            response.message = "Training mode is not active"
-            return response
-
-        self.change_state(State.STANDBY)
-        response.success = True
-        response.message = "Training mode stopped"
-        return response
+    # =====================================================
+    # FOUTEN EN WAARSCHUWINGEN
+    # =====================================================
 
     def enter_error(self, message: str) -> None:
         self.run_enabled = False
@@ -946,6 +753,7 @@ class RobotController(Node):
         if self.current_state != State.ERROR:
             self.previous_state = self.current_state
 
+        # Verhoog de generatie zodat callbacks van de afgebroken actie niets meer doen
         self.operation_generation += 1
         self.vision_request_active = False
         self.manipulator_request_active = False
@@ -983,6 +791,10 @@ class RobotController(Node):
         self.warning_message = ""
         self.publish_warning()
 
+    # =====================================================
+    # STATE- EN UI-PUBLICATIES
+    # =====================================================
+
     def change_state(self, new_state: State) -> None:
         if self.current_state == new_state:
             return
@@ -992,9 +804,7 @@ class RobotController(Node):
         self.current_state = new_state
 
         self.publish_state()
-        self.get_logger().info(
-            f"State changed: {old_state.value} -> {new_state.value}"
-        )
+        self.get_logger().info(f"State changed: {old_state.value} -> {new_state.value}")
 
     def publish_state(self) -> None:
         message = String()
@@ -1003,9 +813,7 @@ class RobotController(Node):
 
     def publish_warning(self) -> None:
         message = String()
-        message.data = (
-            self.warning_message if self.warning_active else ""
-        )
+        message.data = self.warning_message if self.warning_active else ""
         self.warning_publisher.publish(message)
 
     def publish_error(self) -> None:
@@ -1024,6 +832,10 @@ class RobotController(Node):
         self.publish_error()
         self.publish_emergency_stop()
 
+
+# =====================================================
+# MAIN
+# =====================================================
 
 def main(args=None) -> None:
     rclpy.init(args=args)

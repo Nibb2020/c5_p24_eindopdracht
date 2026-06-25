@@ -3,7 +3,7 @@
 import rclpy
 from rclpy.node import Node
 
-from project_interfaces.srv import VoorwerpData
+from project_interfaces.srv import GetObjectData
 
 
 class MockVision(Node):
@@ -11,7 +11,7 @@ class MockVision(Node):
         super().__init__("mock_vision")
 
         self.service = self.create_service(
-            VoorwerpData,
+            GetObjectData,
             "/vision/voorwerp_data",
             self.vision_callback,
         )
@@ -22,20 +22,28 @@ class MockVision(Node):
 
     def vision_callback(
         self,
-        request: VoorwerpData.Request,
-        response: VoorwerpData.Response,
-    ) -> VoorwerpData.Response:
+        request: GetObjectData.Request,
+        response: GetObjectData.Response,
+    ) -> GetObjectData.Response:
         self.get_logger().info(
-            "Mock vision request received"
+            f"Mock vision request received, threshold: "
+            f"{request.confidence_threshold}"
         )
 
-        response.klasse = "rood"
-        response.translation = [
-            0.30,
-            0.20,
-            0.12,
-        ]
-        response.rotation = 0.0
+        response.success = True
+
+        response.object.object_class = "dino"
+        response.object.object_id = "mock_dino_1"
+        response.object.confidence = 0.95
+
+        response.object.transform.transform.translation.x = 0.30
+        response.object.transform.transform.translation.y = 0.20
+        response.object.transform.transform.translation.z = 0.12
+
+        response.object.transform.transform.rotation.x = 0.0
+        response.object.transform.transform.rotation.y = 0.0
+        response.object.transform.transform.rotation.z = 0.0
+        response.object.transform.transform.rotation.w = 1.0
 
         return response
 
