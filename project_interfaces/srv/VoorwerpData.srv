@@ -1,6 +1,0 @@
-float64 confidence                  #request message: minimale confidence threshold
-bool awb                            #request message: 
----
-string klasse                       #response message: type van het voorwerp
-float64[] translation
-float64 rotation
