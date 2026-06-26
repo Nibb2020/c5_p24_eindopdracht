@@ -210,6 +210,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # =====================================================
 
     def create_pipeline(self):
+
         self.get_logger().info('Creating DepthAI pipeline...')  # Log dat de pipeline wordt opgebouwd
 
         pipeline = dai.Pipeline()  # Maak een nieuwe DepthAI pipeline aan

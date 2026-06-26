@@ -7,7 +7,7 @@
   <xacro:arg name="limited" default="false"/>
   <xacro:arg name="effort_control" default="false"/>
   <xacro:arg name="velocity_control" default="false"/>
-  <xacro:arg name="add_gripper" default="true"/>
+  <xacro:arg name="add_gripper" default="false"/>
   <xacro:arg name="add_vacuum_gripper" default="false"/>
   <xacro:arg name="model1300" default="false"/>
   
@@ -240,6 +240,7 @@
     </gazebo>
 
   <!--object zodat hij niet tegen tussenwand aankomt-->
+<!-- object zodat hij niet tegen tussenwand aankomt -->
   <link name="held_object_link">
     <visual>
       <origin xyz="0 0 0" rpy="0 0 0"/>
@@ -268,7 +269,7 @@
   </link>
 
   <joint name="held_object_joint" type="fixed">
-    <parent link="uflite_gripper_link"/>
+    <parent link="link6"/>
     <child link="held_object_link"/>
     <origin xyz="0 0 0.1" rpy="0 0 0"/>
   </joint>

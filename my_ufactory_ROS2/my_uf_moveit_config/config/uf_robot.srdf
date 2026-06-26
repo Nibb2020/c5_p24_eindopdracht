@@ -142,17 +142,13 @@
     <disable_collisions link1="baseplate_link" link2="link2" reason="Never"/>
     <disable_collisions link1="baseplate_link" link2="link_base" reason="Never"/>
     <disable_collisions link1="baseplate_link" link2="mountingplate_link" reason="Adjacent"/>
-    <disable_collisions link1="gripper_lite6_link" link2="held_object_link" reason="Default"/>
+    <disable_collisions link1="gripper_lite6_link" link2="held_object_link" reason="Adjacent"/>
     <disable_collisions link1="gripper_lite6_link" link2="link3" reason="Never"/>
     <disable_collisions link1="gripper_lite6_link" link2="link5" reason="Never"/>
     <disable_collisions link1="gripper_lite6_link" link2="link6" reason="Adjacent"/>
-    <disable_collisions link1="gripper_lite6_link" link2="uflite_gripper_link" reason="Adjacent"/>
-    <disable_collisions link1="held_object_link" link2="link3" reason="Never"/>
-    <disable_collisions link1="held_object_link" link2="link4" reason="Never"/>
     <disable_collisions link1="held_object_link" link2="link5" reason="Never"/>
     <disable_collisions link1="held_object_link" link2="link6" reason="Never"/>
     <disable_collisions link1="held_object_link" link2="link_base" reason="Default"/>
-    <disable_collisions link1="held_object_link" link2="uflite_gripper_link" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="link2" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="link_base" reason="Adjacent"/>
     <disable_collisions link1="link1" link2="mountingplate_link" reason="Never"/>
@@ -163,12 +159,8 @@
     <disable_collisions link1="link3" link2="link4" reason="Adjacent"/>
     <disable_collisions link1="link3" link2="link5" reason="Never"/>
     <disable_collisions link1="link3" link2="link6" reason="Never"/>
-    <disable_collisions link1="link3" link2="uflite_gripper_link" reason="Never"/>
     <disable_collisions link1="link4" link2="link5" reason="Adjacent"/>
     <disable_collisions link1="link4" link2="link6" reason="Never"/>
-    <disable_collisions link1="link4" link2="uflite_gripper_link" reason="Never"/>
     <disable_collisions link1="link5" link2="link6" reason="Adjacent"/>
-    <disable_collisions link1="link5" link2="uflite_gripper_link" reason="Never"/>
-    <disable_collisions link1="link6" link2="uflite_gripper_link" reason="Adjacent"/>
     <disable_collisions link1="link_base" link2="mountingplate_link" reason="Adjacent"/>
 </robot>

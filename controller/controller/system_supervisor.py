@@ -41,7 +41,7 @@ class SystemSupervisor(Node):
         # Workspace that contains the built ROS 2 installation.
         self.declare_parameter(
             "workspace_path",
-            "/home/student/P4_C5_project_ws",
+            "/home/student/c5_p24_eindproject_ws",
         )
 
         # Package and launch file used to start the robot and manipulator.
