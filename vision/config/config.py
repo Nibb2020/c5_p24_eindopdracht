@@ -8,6 +8,14 @@ import numpy as np
 DEBUG_PUBLISH_CONTINUOUS = False  # True = live marked image constant publiceren, False = alleen publiceren bij service request
 DEBUG_DRAW_ARUCO_LIVE = True  # True = ArUco tekenen in debugbeeld, False = live debugbeeld zonder ArUco-overlay
 
+DEBUG_LOG_DEVICE_INFO = True  # Print OAK-D device info bij opstarten
+DEBUG_LOG_SYNC = False  # Print synced packet sequence nummers
+DEBUG_LOG_FRAME_INFO = False  # Print framevormen en aantal ruwe detecties
+DEBUG_LOG_ARUCO_POSE = False  # Print ArUco rvec/tvec/reprojection details
+DEBUG_LOG_TRANSFORM_POINTS = False  # Print point_camera en point_marker
+DEBUG_LOG_SAMPLE_RESULT = True  # Print alleen eindresultaat per service request
+DEBUG_LOG_REJECTED_SAMPLES = False  # Print geweigerde samples tijdens stabiele meting
+
 # ==================================================
 # Camera
 # ==================================================
@@ -51,10 +59,19 @@ DEPTH_BAND_MM = 80          # Depthband rondom mediaanwaarde voor PCA-masker
 MIN_VALID_DEPTH_PIXELS = 20 # Minimum aantal geldige depthpixels
 
 # ==================================================
+# Object Measurement Filtering
+# ==================================================
+
+OBJECT_SAMPLE_COUNT = 3  # Aantal geldige objectmetingen per service-call
+OBJECT_SAMPLE_TIMEOUT_SEC = 4  # Maximale zoektijd voor alle metingen samen
+OBJECT_MAX_POSITION_STD_M = 0.002  # Maximale standaarddeviatie in meters voor betrouwbare XYZ-meting
+OBJECT_MAX_YAW_STD_RAD = 0.08  # Maximale yaw-spreiding in radialen voor betrouwbare rotatiemeting
+
+# ==================================================
 # Dataset
 # ==================================================
 
-SAVE_DATASET_ON_REQUEST = True  # Sla datasetopname op bij succesvolle objectrequest
+SAVE_DATASET_ON_REQUEST = False  # Sla datasetopname op bij succesvolle objectrequest
 DATASET_FOLDER = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/dataset"  # Datasetbasispad
 
 # ==================================================
@@ -80,10 +97,10 @@ YOLO_CLASS_MAPPING = {          # Mapping van klassenaam naar class-ID
 }
 
 YOLO_CLASS_NAMES = {  # Mapping van class-ID naar klassenaam
-    0: "Bootje",
-    1: "Dino",
-    2: "Olifantje",
-    3: "Smiley",
+    0: "schip",
+    1: "dino",
+    2: "olifant",
+    3: "smiley",
 }
 
 # ==================================================
@@ -99,7 +116,7 @@ ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojectio
 
 ARUCO_WORLD_X = 0.712       # World X-positie van markerorigin
 ARUCO_WORLD_Y = 0.277       # World Y-positie van markerorigin
-ARUCO_WORLD_Z = 0.0      # World Z-positie van markerorigin
+ARUCO_WORLD_Z = 0.08      # World Z-positie van markerorigin
 
 CAMERA_MATRIX = np.array([
     [919.80036341, 0.00000000, 321.10036797],

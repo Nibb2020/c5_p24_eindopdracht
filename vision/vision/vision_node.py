@@ -200,6 +200,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             else:
                 ctrl.setAutoWhiteBalanceMode(dai.CameraControl.AutoWhiteBalanceMode.OFF)  # Zet AWB uit
                 self.get_logger().info("Hardware AWB disabled")  # Log dat AWB uit staat
+            self.get_logger().info("=================================")
             self.camera_control_queue.send(ctrl)  # Verstuur controlcommand naar de camera
         except Exception as ex:
             self.get_logger().warn(f"Failed to set AWB mode: {ex}")  # Log fout bij AWB-instelling
@@ -227,7 +228,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         cam_rgb.setInterleaved(False)  # Gebruik planar output in plaats van interleaved output
         cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)  # Gebruik BGR-volgorde voor OpenCV
         cam_rgb.setPreviewSize(RGB_WIDTH, RGB_HEIGHT)  # Zet previewformaat vanuit config.py
-        cam_rgb.setPreviewKeepAspectRatio(False)  # Behoud aspect ratio bij het maken van de preview
+        cam_rgb.setPreviewKeepAspectRatio(True)  # Behoud aspect ratio bij het maken van de preview
 
         left.setBoardSocket(dai.CameraBoardSocket.CAM_B)  # Selecteer linker mono-camera op CAM_B
         right.setBoardSocket(dai.CameraBoardSocket.CAM_C)  # Selecteer rechter mono-camera op CAM_C
@@ -287,7 +288,8 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                     self.get_logger().info(f"Connecting OAK-D ({attempt + 1}/{RECONNECT_ATTEMPTS})")  # Log verbindingspoging
                     self.pipeline = self.create_pipeline()  # Bouw nieuwe pipeline
                     self.device = dai.Device(self.pipeline, maxUsbSpeed=dai.UsbSpeed.HIGH)  # Open device met maximaal USB HIGH
-                    self.print_device_information()  # Print deviceinformatie
+                    if DEBUG_LOG_DEVICE_INFO:  # Controleer of device-info in terminal gewenst is
+                        self.print_device_information()  # Print deviceinformatie
                     if USE_DEVICE_CALIBRATION:  # Controleer of EEPROM-calibratie gebruikt moet worden
                         self.load_device_calibration()  # Laad devicecalibratie
 
@@ -388,9 +390,10 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             self.tvec = tvec.copy()  # Sla geaccepteerde translatievector op
             self.world_calibrated = True  # Markeer world calibration als geldig
 
-            self.get_logger().info(f"ArUco reprojection error: {reprojection_error:.3f} px")  # Log reprojection error
-            self.get_logger().info(f"ArUco rvec: {self.rvec.flatten()}")  # Log ArUco rotatievector
-            self.get_logger().info(f"ArUco tvec: {self.tvec.flatten()}")  # Log ArUco translatievector
+            if DEBUG_LOG_ARUCO_POSE:  # Controleer of ArUco pose debug gewenst is
+                self.get_logger().info(f"ArUco reprojection error: {reprojection_error:.3f} px")  # Log reprojection error
+                self.get_logger().info(f"ArUco rvec: {self.rvec.flatten()}")  # Log ArUco rotatievector
+                self.get_logger().info(f"ArUco tvec: {self.tvec.flatten()}")  # Log ArUco translatievector
 
             cv2.aruco.drawDetectedMarkers(frame, corners, ids)  # Teken gevonden markers
 
@@ -403,9 +406,8 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                 self.aruco_size_m  # Aslengte
             )
 
-            self.get_logger().info(  # Log markerpositie
-                f'ArUco ID {marker_id}: x={float(tvec[0]):.3f} m, y={float(tvec[1]):.3f} m, z={float(tvec[2]):.3f} m'
-            )
+            if DEBUG_LOG_ARUCO_POSE:  # Controleer of ArUco positie debug gewenst is
+                self.get_logger().info(f'ArUco ID {marker_id}: x={float(tvec[0]):.3f} m, y={float(tvec[1]):.3f} m, z={float(tvec[2]):.3f} m') # Log marker positie
 
             return frame, True  # Geef frame en successtatus terug
 
@@ -423,42 +425,21 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             return True  # Accepteer eerste pose altijd
 
         translation_jump = float(np.linalg.norm(tvec - self.last_valid_tvec))  # Bereken verschil in translatie
-        rotation_jump = float(np.linalg.norm(rvec - self.last_valid_rvec))  # Bereken verschil in rotatievector
+        rotation_jump = self.calculate_rvec_rotation_difference(rvec, self.last_valid_rvec)  # Bereken fysiek rotatieverschil
 
         if translation_jump > self.max_aruco_translation_jump_m:  # Controleer of translatie te veel springt
-            self.get_logger().warn(f"Rejected ArUco pose: translation jump {translation_jump:.3f} m")  # Log geweigerde translatie
+            if DEBUG_LOG_REJECTED_SAMPLES:  # Controleer of rejected-sample logs gewenst zijn
+                self.get_logger().warn(f"Rejected ArUco pose: translation jump {translation_jump:.3f} m")  # Log geweigerde translatie
             return False  # Weiger deze ArUco-pose
 
         if rotation_jump > self.max_aruco_rotation_jump_rad:  # Controleer of rotatie te veel springt
-            self.get_logger().warn(f"Rejected ArUco pose: rotation jump {rotation_jump:.3f} rad")  # Log geweigerde rotatie
+            if DEBUG_LOG_REJECTED_SAMPLES:  # Controleer of rejected-sample logs gewenst zijn
+                self.get_logger().warn(f"Rejected ArUco pose: rotation jump {rotation_jump:.3f} rad")  # Log geweigerde rotatie
             return False  # Weiger deze ArUco-pose
 
         self.last_valid_rvec = rvec.copy()  # Bewaar geaccepteerde rotatievector
         self.last_valid_tvec = tvec.copy()  # Bewaar geaccepteerde translatievector
         return True  # Accepteer deze ArUco-pose
-
-    # =====================================================
-    # Normalize Angle
-    # =====================================================
-
-    def normalize_angle_pi(self, angle):  # Normaliseer hoek naar bereik -pi tot +pi
-        while angle > math.pi:  # Controleer of hoek boven pi ligt
-            angle -= 2.0 * math.pi  # Trek volledige rotatie af
-        while angle <= -math.pi:  # Controleer of hoek onder of gelijk aan -pi ligt
-            angle += 2.0 * math.pi  # Tel volledige rotatie op
-        return angle  # Geef genormaliseerde hoek terug
-
-    # =====================================================
-    # Normalize Axis Yaw
-    # =====================================================
-
-    def normalize_axis_yaw(self, yaw):  # Normaliseer yaw als asrichting waarbij yaw en yaw+pi gelijkwaardig zijn
-        yaw = self.normalize_angle_pi(yaw)  # Breng yaw eerst naar -pi tot +pi
-        if yaw > math.pi / 2.0:  # Controleer of yaw boven +90 graden ligt
-            yaw -= math.pi  # Trek 180 graden af voor equivalente asrichting
-        if yaw <= -math.pi / 2.0:  # Controleer of yaw onder -90 graden ligt
-            yaw += math.pi  # Tel 180 graden op voor equivalente asrichting
-        return yaw  # Geef yaw terug binnen -90 tot +90 graden
 
     # =====================================================
     # Reprojection Error
@@ -524,12 +505,13 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         return True, best_rvec, best_tvec, best_error  # Geef beste pose terug
 
     # =====================================================
-    # ROI Depth To Camera XYZ
+    # Depth Position From ROI
     # =====================================================
 
-    def estimate_xyz_from_roi(self, depth_frame, bbox):
+    def estimate_position_from_depth_roi(self, depth_frame, bbox):
         x_min, y_min, x_max, y_max = bbox  # Lees bbox uit
         depth_height, depth_width = depth_frame.shape[:2]  # Lees depthformaat uit
+
         x_min = max(0, min(x_min, depth_width - 1))  # Clamp links
         x_max = max(0, min(x_max, depth_width - 1))  # Clamp rechts
         y_min = max(0, min(y_min, depth_height - 1))  # Clamp boven
@@ -538,66 +520,151 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         if x_max <= x_min or y_max <= y_min:  # Controleer geldige ROI
             return None  # Stop bij ongeldige ROI
 
-        center_x = int((x_min + x_max) / 2)  # Bepaal ROI-midden X
-        center_y = int((y_min + y_max) / 2)  # Bepaal ROI-midden Y
         roi_width = x_max - x_min  # Bereken ROI-breedte
         roi_height = y_max - y_min  # Bereken ROI-hoogte
-        shrunk_width = int(roi_width * ROI_SHRINK_FACTOR)  # Verklein ROI-breedte
-        shrunk_height = int(roi_height * ROI_SHRINK_FACTOR)  # Verklein ROI-hoogte
-        roi_x_min = max(0, center_x - shrunk_width // 2)  # Nieuwe ROI-links
-        roi_x_max = min(depth_width, center_x + shrunk_width // 2)  # Nieuwe ROI-rechts
-        roi_y_min = max(0, center_y - shrunk_height // 2)  # Nieuwe ROI-boven
-        roi_y_max = min(depth_height, center_y + shrunk_height // 2)  # Nieuwe ROI-onder
-        roi_depth = depth_frame[roi_y_min:roi_y_max, roi_x_min:roi_x_max]  # Pak depth-ROI
-        valid_depth = roi_depth[(roi_depth > MIN_DEPTH_MM) & (roi_depth < MAX_DEPTH_MM)]  # Filter ongeldige depthwaarden
+        bbox_center_x = int((x_min + x_max) / 2)  # Bepaal bboxcentrum X als fallback
+        bbox_center_y = int((y_min + y_max) / 2)  # Bepaal bboxcentrum Y als fallback
+
+        shrunk_width = int(roi_width * ROI_SHRINK_FACTOR)  # Verklein ROI-breedte voor depthmeting
+        shrunk_height = int(roi_height * ROI_SHRINK_FACTOR)  # Verklein ROI-hoogte voor depthmeting
+        roi_x_min = max(0, bbox_center_x - shrunk_width // 2)  # Nieuwe ROI-links
+        roi_x_max = min(depth_width, bbox_center_x + shrunk_width // 2)  # Nieuwe ROI-rechts
+        roi_y_min = max(0, bbox_center_y - shrunk_height // 2)  # Nieuwe ROI-boven
+        roi_y_max = min(depth_height, bbox_center_y + shrunk_height // 2)  # Nieuwe ROI-onder
+
+        roi_depth = depth_frame[roi_y_min:roi_y_max, roi_x_min:roi_x_max]  # Pak centrale depth-ROI
+        valid_depth = roi_depth[(roi_depth > MIN_DEPTH_MM) & (roi_depth < MAX_DEPTH_MM)]  # Filter geldige depthwaarden
 
         if valid_depth.size < MIN_VALID_DEPTH_PIXELS:  # Controleer genoeg geldige depthpixels
-            return None  # Stop bij te weinig depth
+            return None  # Stop bij te weinig geldige depth
 
-        z_mm = float(np.median(valid_depth))  # Bepaal mediaan depth in millimeters
+        z_mm = float(np.median(valid_depth))  # Bepaal mediaan objectdiepte
         z_m = z_mm / 1000.0  # Zet depth om naar meters
+
+        full_roi_depth = depth_frame[y_min:y_max, x_min:x_max]  # Pak volledige bbox-ROI voor zwaartepunt
+        object_mask = (  # Maak depthmasker rond objectdiepte
+            (full_roi_depth > z_mm - DEPTH_BAND_MM) &
+            (full_roi_depth < z_mm + DEPTH_BAND_MM)
+        )
+
+        ys, xs = np.where(object_mask)  # Zoek objectpixels binnen bbox
+
+        if xs.size >= MIN_VALID_DEPTH_PIXELS:  # Controleer of genoeg objectpixels bestaan
+            center_x = int(x_min + np.mean(xs))  # Gebruik oud depth-zwaartepunt X
+            center_y = int(y_min + np.mean(ys))  # Gebruik oud depth-zwaartepunt Y
+        else:
+            center_x = bbox_center_x  # Gebruik bboxcentrum als fallback
+            center_y = bbox_center_y  # Gebruik bboxcentrum als fallback
+
         fx = float(self.camera_matrix[0, 0])  # Lees fx uit cameramatrix
         fy = float(self.camera_matrix[1, 1])  # Lees fy uit cameramatrix
         cx_camera = float(self.camera_matrix[0, 2])  # Lees cx uit cameramatrix
         cy_camera = float(self.camera_matrix[1, 2])  # Lees cy uit cameramatrix
-        x_m = ((center_x - cx_camera) * z_m / fx)  # Bereken camera-X
-        y_m = ((center_y - cy_camera) * z_m / fy)  # Bereken camera-Y
-        return (x_m, y_m, z_m, z_mm, center_x, center_y)  # Geef XYZ, depth en ROI-midden terug
+
+        x_m = ((center_x - cx_camera) * z_m / fx)  # Bereken camera-X vanuit oud middenpunt
+        y_m = ((center_y - cy_camera) * z_m / fy)  # Bereken camera-Y vanuit oud middenpunt
+
+        return (x_m, y_m, z_m, z_mm, center_x, center_y)  # Geef positie terug
 
     # =====================================================
-    # PCA Yaw From Depth ROI
+    # Classical Object Pose From ROI
     # =====================================================
 
-    def estimate_yaw_from_depth_roi(self, depth_frame, bbox, z_mm):
-        x_min, y_min, x_max, y_max = bbox  # Lees bbox uit
-        depth_height, depth_width = depth_frame.shape[:2]  # Lees depthformaat uit
-        x_min = max(0, min(x_min, depth_width - 1))  # Clamp links
-        x_max = max(0, min(x_max, depth_width - 1))  # Clamp rechts
-        y_min = max(0, min(y_min, depth_height - 1))  # Clamp boven
-        y_max = max(0, min(y_max, depth_height - 1))  # Clamp onder
+    def estimate_object_axis_from_classical_roi(self, frame, bbox):
+        x_min, y_min, x_max, y_max = bbox  # Lees YOLO-boundingbox uit
+        image_height, image_width = frame.shape[:2]  # Lees beeldformaat
 
-        if x_max <= x_min or y_max <= y_min:  # Controleer geldige ROI
-            return 0.0  # Geef neutrale yaw terug
+        x_min = max(0, min(x_min, image_width - 1))  # Clamp bbox-links
+        x_max = max(0, min(x_max, image_width - 1))  # Clamp bbox-rechts
+        y_min = max(0, min(y_min, image_height - 1))  # Clamp bbox-boven
+        y_max = max(0, min(y_max, image_height - 1))  # Clamp bbox-onder
 
-        roi_depth = depth_frame[y_min:y_max, x_min:x_max]  # Pak depth binnen bbox
-        mask = ((roi_depth > z_mm - DEPTH_BAND_MM) & (roi_depth < z_mm + DEPTH_BAND_MM))  # Maak dieptemasker rond objectdiepte
-        ys, xs = np.where(mask)  # Zoek geldige pixels in masker
+        if x_max <= x_min or y_max <= y_min:  # Controleer geldige bbox
+            return None  # Stop bij ongeldige bbox
 
-        if xs.size < 20:  # Controleer genoeg punten voor PCA
-            return 0.0  # Geef neutrale yaw terug
+        bbox_width = x_max - x_min  # Bereken bbox-breedte
+        bbox_height = y_max - y_min  # Bereken bbox-hoogte
+        margin_x = int(bbox_width * 0.25)  # Maak cropmarge in X
+        margin_y = int(bbox_height * 0.25)  # Maak cropmarge in Y
 
-        points = np.column_stack((xs.astype(np.float32), ys.astype(np.float32)))  # Bouw 2D-puntenwolk
+        crop_x_min = max(0, x_min - margin_x)  # Bepaal crop-links
+        crop_x_max = min(image_width, x_max + margin_x)  # Bepaal crop-rechts
+        crop_y_min = max(0, y_min - margin_y)  # Bepaal crop-boven
+        crop_y_max = min(image_height, y_max + margin_y)  # Bepaal crop-onder
+
+        crop = frame[crop_y_min:crop_y_max, crop_x_min:crop_x_max].copy()  # Pak RGB-crop
+        crop_height, crop_width = crop.shape[:2]  # Lees cropformaat
+
+        if crop_width < 10 or crop_height < 10:  # Controleer minimale cropgrootte
+            return None  # Stop bij te kleine crop
+
+        grabcut_mask = np.zeros((crop_height, crop_width), dtype=np.uint8)  # Maak GrabCut-masker
+        bgd_model = np.zeros((1, 65), dtype=np.float64)  # Maak achtergrondmodel
+        fgd_model = np.zeros((1, 65), dtype=np.float64)  # Maak voorgrondmodel
+
+        rect_x = max(1, x_min - crop_x_min)  # Bbox-links relatief in crop
+        rect_y = max(1, y_min - crop_y_min)  # Bbox-boven relatief in crop
+        rect_w = max(2, min(x_max - x_min, crop_width - rect_x - 1))  # Bbox-breedte relatief in crop
+        rect_h = max(2, min(y_max - y_min, crop_height - rect_y - 1))  # Bbox-hoogte relatief in crop
+        grabcut_rect = (rect_x, rect_y, rect_w, rect_h)  # Maak GrabCut-rectangle
+
+        try:
+            cv2.grabCut(crop, grabcut_mask, grabcut_rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)  # Segmenteer object
+        except Exception as ex:
+            self.get_logger().warn(f"GrabCut failed: {ex}")  # Log fout
+            return None  # Stop bij fout
+
+        foreground_mask = (  # Maak binair voorgrondmasker
+            (grabcut_mask == cv2.GC_FGD) |
+            (grabcut_mask == cv2.GC_PR_FGD)
+        ).astype(np.uint8)  # Zet om naar uint8
+
+        kernel = np.ones((3, 3), np.uint8)  # Maak morphology-kernel
+        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, kernel)  # Verwijder ruis
+        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, kernel)  # Vul kleine gaten
+
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask, connectivity=8)  # Zoek componenten
+
+        if num_labels <= 1:  # Controleer of objectcomponent bestaat
+            return None  # Stop zonder objectcomponent
+
+        largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))  # Kies grootste component
+        object_mask = (labels == largest_label).astype(np.uint8)  # Maak objectmasker
+        ys, xs = np.where(object_mask > 0)  # Zoek objectpixels
+
+        if xs.size < MIN_VALID_DEPTH_PIXELS:  # Controleer genoeg objectpixels
+            return None  # Stop bij te weinig pixels
+
+        global_xs = xs + crop_x_min  # Zet crop-X om naar beeld-X
+        global_ys = ys + crop_y_min  # Zet crop-Y om naar beeld-Y
+
+        points = np.column_stack((global_xs.astype(np.float32), global_ys.astype(np.float32)))  # Bouw puntenwolk van objectpixels
         mean = np.mean(points, axis=0)  # Bereken gemiddelde punt
         centered_points = points - mean  # Centreer puntenwolk
-        covariance = np.cov(centered_points, rowvar=False)  # Bereken covariantiematrix
-        eigenvalues, eigenvectors = np.linalg.eig(covariance)  # Bereken eigenwaarden en eigenvectoren
-        principal_axis = eigenvectors[:, np.argmax(eigenvalues)]  # Kies hoofdas met grootste variantie
-        if float(principal_axis[0]) < 0.0:  # Controleer of PCA-as naar links wijst
-            principal_axis = -principal_axis  # Draai PCA-as om zodat de richting consistent naar rechts wijst
 
-        yaw = math.atan2(float(principal_axis[1]), float(principal_axis[0]))  # Bereken beeldvlak-yaw
-        yaw = self.normalize_axis_yaw(yaw)  # Normaliseer yaw als richtingloze as
-        return yaw  # Geef gestabiliseerde yaw in radialen terug
+        covariance = np.cov(centered_points, rowvar=False)  # Bereken covariantie
+        eigenvalues, eigenvectors = np.linalg.eig(covariance)  # Bereken PCA
+
+        sorted_indices = np.argsort(eigenvalues)[::-1]  # Sorteer eigenwaarden aflopend
+        major_index = int(sorted_indices[0])  # Index langste as
+        minor_index = int(sorted_indices[1])  # Index kortste as
+
+        principal_axis = eigenvectors[:, major_index]  # Pak langste objectas
+
+        if float(principal_axis[0]) < 0.0:  # Houd richting consistent
+            principal_axis = -principal_axis  # Draai as om
+
+        raw_object_axis_yaw = math.atan2(float(principal_axis[1]), float(principal_axis[0]))  # Bereken ruwe objectas
+        raw_gripper_yaw = raw_object_axis_yaw + math.pi / 2.0  # Bereken ruwe gripperas exact haaks
+
+        object_axis_yaw = self.normalize_axis_yaw(raw_object_axis_yaw)  # Normaliseer objectas voor opslag
+        gripper_yaw = self.normalize_axis_yaw(raw_gripper_yaw)  # Normaliseer gripperas voor opslag
+
+        eigenvalue_major = float(eigenvalues[major_index])  # Lees hoofdvariantie
+        eigenvalue_minor = float(eigenvalues[minor_index])  # Lees minorvariantie
+        axis_ratio = eigenvalue_major / max(eigenvalue_minor, 1e-6)  # Bereken asbetrouwbaarheid
+
+        return (gripper_yaw, object_axis_yaw, axis_ratio)  # Geef alleen rotatie-info terug
 
     # =====================================================
     # Image Yaw To World Yaw
@@ -622,6 +689,159 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         return world_yaw  # Geef gestabiliseerde world-yaw terug
 
     # =====================================================
+    # Normalize Angle
+    # =====================================================
+
+    def normalize_angle_pi(self, angle):
+        while angle > math.pi:  # Controleer of hoek groter is dan pi
+            angle -= 2.0 * math.pi  # Trek één volledige rotatie af
+        while angle <= -math.pi:  # Controleer of hoek kleiner of gelijk is aan min pi
+            angle += 2.0 * math.pi  # Tel één volledige rotatie op
+        return angle  # Geef genormaliseerde hoek terug
+
+    # =====================================================
+    # Normalize Axis Yaw
+    # =====================================================
+
+    def normalize_axis_yaw(self, yaw):
+        yaw = self.normalize_angle_pi(yaw)  # Normaliseer yaw eerst naar -pi tot +pi
+        if yaw > math.pi / 2.0:  # Controleer of yaw boven +90 graden ligt
+            yaw -= math.pi  # Trek 180 graden af omdat de grijpas richtingloos is
+        if yaw <= -math.pi / 2.0:  # Controleer of yaw onder of gelijk aan -90 graden ligt
+            yaw += math.pi  # Tel 180 graden op omdat de grijpas richtingloos is
+        return yaw  # Geef yaw terug binnen -90 tot +90 graden
+
+    # =====================================================
+    # Mean Axis Yaw
+    # =====================================================
+
+    def mean_axis_yaw(self, yaw_values):
+        if len(yaw_values) == 0:  # Controleer of er yaw-waarden zijn
+            return 0.0  # Geef neutrale yaw terug
+
+        doubled_sin_sum = 0.0  # Som van sinus van dubbele yaw
+        doubled_cos_sum = 0.0  # Som van cosinus van dubbele yaw
+
+        for yaw in yaw_values:  # Loop door alle yaw-metingen
+            normalized_yaw = self.normalize_axis_yaw(float(yaw))  # Normaliseer yaw als richtingloze as
+            doubled_sin_sum += math.sin(2.0 * normalized_yaw)  # Voeg sinus van dubbele yaw toe
+            doubled_cos_sum += math.cos(2.0 * normalized_yaw)  # Voeg cosinus van dubbele yaw toe
+
+        mean_doubled_yaw = math.atan2(doubled_sin_sum, doubled_cos_sum)  # Bereken gemiddelde dubbele hoek
+        mean_yaw = 0.5 * mean_doubled_yaw  # Halveer terug naar gewone yaw
+        mean_yaw = self.normalize_axis_yaw(mean_yaw)  # Normaliseer eindresultaat opnieuw
+        return mean_yaw  # Geef gemiddelde richtingloze yaw terug
+
+    # =====================================================
+    # Axis Yaw Standard Deviation
+    # =====================================================
+
+    def axis_yaw_std(self, yaw_values, mean_yaw):
+        if len(yaw_values) <= 1:  # Controleer of standaarddeviatie zinvol is
+            return 0.0  # Geef nul terug bij één of geen metingen
+
+        errors = []  # Maak lijst voor hoekfouten
+
+        for yaw in yaw_values:  # Loop door alle yaw-metingen
+            yaw_error = self.normalize_axis_yaw(float(yaw) - float(mean_yaw))  # Bereken richtingloze yaw-fout
+            errors.append(yaw_error)  # Voeg fout toe aan lijst
+
+        return float(np.std(np.array(errors, dtype=np.float64)))  # Geef standaarddeviatie van yaw terug
+
+    # =====================================================
+    # Combine Object Measurements
+    # =====================================================
+
+    def combine_object_measurements(self, measurements):
+        if len(measurements) == 0:  # Controleer of er metingen zijn
+            return None  # Geef None terug zonder metingen
+
+        x_values = np.array([float(obj["x"]) for obj in measurements], dtype=np.float64)  # Verzamel X-waarden
+        y_values = np.array([float(obj["y"]) for obj in measurements], dtype=np.float64)  # Verzamel Y-waarden
+        z_values = np.array([float(obj["z"]) for obj in measurements], dtype=np.float64)  # Verzamel Z-waarden
+        yaw_values = [float(obj["yaw"]) for obj in measurements]  # Verzamel yaw-waarden
+        confidence_values = np.array([float(obj["confidence"]) for obj in measurements], dtype=np.float64)  # Verzamel confidencewaarden
+
+        median_x = float(np.median(x_values))  # Neem mediaan van X voor robuuste positie
+        median_y = float(np.median(y_values))  # Neem mediaan van Y voor robuuste positie
+        median_z = float(np.median(z_values))  # Neem mediaan van Z voor robuuste positie
+        mean_yaw = self.mean_axis_yaw(yaw_values)  # Neem correct hoekgemiddelde van yaw
+        mean_confidence = float(np.mean(confidence_values))  # Neem gemiddelde confidence
+
+        std_x = float(np.std(x_values))  # Bereken X-spreiding
+        std_y = float(np.std(y_values))  # Bereken Y-spreiding
+        std_z = float(np.std(z_values))  # Bereken Z-spreiding
+        std_position = float(max(std_x, std_y, std_z))  # Neem grootste XYZ-spreiding als betrouwbaarheidsscore
+        std_yaw = self.axis_yaw_std(yaw_values, mean_yaw)  # Bereken yaw-spreiding
+
+        best_reference = max(measurements, key=lambda obj: float(obj["confidence"]))  # Gebruik hoogste confidence als basisrecord
+        combined_object = best_reference.copy()  # Maak kopie van beste objectrecord
+
+        combined_object["object_id"] = str(uuid.uuid4())  # Maak nieuw ID voor gecombineerde meting
+        combined_object["x"] = median_x  # Vul gefilterde X
+        combined_object["y"] = median_y  # Vul gefilterde Y
+        combined_object["z"] = median_z  # Vul gefilterde Z
+        combined_object["yaw"] = mean_yaw  # Vul gefilterde yaw
+        combined_object["confidence"] = mean_confidence  # Vul gemiddelde confidence
+        combined_object["position_std"] = std_position  # Bewaar grootste XYZ-spreiding voor debug
+        combined_object["yaw_std"] = std_yaw  # Bewaar yaw-spreiding voor debug
+        combined_object["sample_count"] = len(measurements)  # Bewaar aantal gebruikte metingen
+
+        if DEBUG_LOG_SAMPLE_RESULT:  # Controleer of eindresultaat gelogd moet worden
+            self.get_logger().info(  # Log gecombineerde meetkwaliteit
+                f"Combined object from {len(measurements)} samples: "
+                f"x={median_x:.4f}, y={median_y:.4f}, z={median_z:.4f}, yaw={mean_yaw:.4f}, "
+                f"pos_std={std_position:.4f} m, yaw_std={std_yaw:.4f} rad"
+            )
+
+        if std_position > OBJECT_MAX_POSITION_STD_M:  # Controleer of positie te veel spreidt
+            self.get_logger().warn(f"Object position spread too high: {std_position:.4f} m")  # Log te hoge XYZ-spreiding
+
+        if std_yaw > OBJECT_MAX_YAW_STD_RAD:  # Controleer of yaw te veel spreidt
+            self.get_logger().warn(f"Object yaw spread too high: {std_yaw:.4f} rad")  # Log te hoge yaw-spreiding
+
+        return combined_object  # Geef gecombineerd object terug
+
+    # =====================================================
+    # Process Stable Object Request
+    # =====================================================
+
+    def process_synced_packets_to_best_object(self, nn_frame_packet, detection_packet, depth_packet, save_dataset=False):
+        frame = nn_frame_packet.getCvFrame()  # Haal NN-frame op
+        depth_frame = depth_packet.getFrame()  # Haal depthframe op
+
+        if DEBUG_LOG_FRAME_INFO:  # Controleer of frame/debuginformatie gewenst is
+            self.get_logger().info(f"NN frame shape: {frame.shape}")  # Log RGB/NN-frameformaat
+            self.get_logger().info(f"Depth frame shape: {depth_frame.shape}")  # Log depthframeformaat
+            self.get_logger().info(f"Raw detections: {len(detection_packet.detections)}")  # Log aantal ruwe YOLO-detecties
+
+        frame, calibrated = self.estimate_aruco_pose(frame)  # Bepaal ArUco world pose
+
+        if not calibrated and DEBUG_LOG_REJECTED_SAMPLES:  # Controleer of world calibration gelukt is
+            self.get_logger().warn("Object sample rejected: ArUco marker not detected")  # Log ontbrekende ArUco marker
+            return None  # Stop zonder object
+
+        object_list, best_object, dataset_frame, marked_frame = self.process_frame_to_objects(  # Verwerk detecties naar objecten
+            frame,  # Gebruik NN-frame
+            depth_frame,  # Gebruik gesynchroniseerd depthframe
+            detection_packet.detections  # Gebruik YOLO-detecties
+        )
+
+        if len(object_list) == 0 and DEBUG_LOG_REJECTED_SAMPLES:  # Controleer of er objecten over zijn
+            self.get_logger().warn("Object sample rejected: no valid objects with depth")  # Log geen geldige objecten
+            return None  # Stop zonder object
+
+        if SAVE_DATASET_ON_REQUEST and save_dataset:  # Controleer of datasetopslag voor deze sample gewenst is
+            self.save_dataset_sample(dataset_frame, object_list)  # Sla datasetopname op
+
+        if best_object is None and DEBUG_LOG_REJECTED_SAMPLES:  # Controleer of robotgeschikt object bestaat
+            self.get_logger().warn("Object sample rejected: no robot-pickable object")  # Log geen robotobject
+            return None  # Stop zonder robotobject
+
+        self.marked_image_pub.publish(self.bridge.cv2_to_imgmsg(marked_frame, encoding="bgr8"))  # Publiceer gemarkeerd beeld
+        return best_object  # Geef beste object terug
+
+    # =====================================================
     # Process Frame To Objects
     # =====================================================
 
@@ -644,30 +864,43 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             y_min = int(detection.ymin * frame.shape[0])  # Bereken bbox boven
             y_max = int(detection.ymax * frame.shape[0])  # Bereken bbox onder
             bbox = (x_min, y_min, x_max, y_max)  # Bouw bbox tuple
-            xyz_result = self.estimate_xyz_from_roi(depth_frame, bbox)  # Bereken camera XYZ uit depth-ROI
+            position_result = self.estimate_position_from_depth_roi(depth_frame, bbox)  # Gebruik oude betere positiebepaling
 
-            if xyz_result is None:  # Controleer of depth geldig is
-                continue  # Sla object zonder geldige depth over
+            if position_result is None:  # Controleer of positie geldig is
+                continue  # Sla object zonder geldige positie over
 
-            camera_x, camera_y, camera_z, z_mm, center_x, center_y = xyz_result  # Pak spatial resultaat uit
-            image_yaw = self.estimate_yaw_from_depth_roi(depth_frame, bbox, z_mm)  # Bereken PCA-yaw in beeldvlak
-            world_x, world_y, world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer camera XYZ naar world XYZ
-            world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_yaw)  # Transformeer beeld-yaw naar world-yaw
+            camera_x, camera_y, camera_z, z_mm, center_x, center_y = position_result  # Pak oude positie uit
+
+            axis_result = self.estimate_object_axis_from_classical_roi(frame, bbox)  # Gebruik klassieke vision alleen voor objectas
+
+            if axis_result is None:  # Controleer of rotatie geldig is
+                image_gripper_yaw = 0.0  # Gebruik fallback-gripperhoek
+                image_object_axis_yaw = 0.0  # Gebruik fallback-objectas
+                axis_ratio = 0.0  # Markeer lage betrouwbaarheid
+            else:
+                image_gripper_yaw, image_object_axis_yaw, axis_ratio = axis_result  # Pak rotatie uit
+
+            cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)  # Teken optisch zwaartepunt rood
+
+            world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_gripper_yaw)  # Transformeer gripperrichting naar world-yaw
+            world_x, world_y, world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer optisch zwaartepunt naar world-positie
 
             obj = {  # Bouw intern objectrecord
-                "object_id": str(uuid.uuid4()),
-                "class": int(detection.label),
-                "confidence": confidence,
-                "x": world_x,
-                "y": world_y,
-                "z": world_z,
-                "camera_x": camera_x,
-                "camera_y": camera_y,
-                "camera_z": camera_z,
-                "yaw": world_yaw,
-                "image_yaw": image_yaw,
-                "bbox": bbox,
-                "robot_pickable": False
+                "object_id": str(uuid.uuid4()),  # Maak uniek object-ID
+                "class": int(detection.label),  # Bewaar klasse-ID
+                "confidence": confidence,  # Bewaar confidence
+                "x": world_x,  # Bewaar world-X
+                "y": world_y,  # Bewaar world-Y
+                "z": world_z,  # Bewaar world-Z
+                "camera_x": camera_x,  # Bewaar camera-X
+                "camera_y": camera_y,  # Bewaar camera-Y
+                "camera_z": camera_z,  # Bewaar camera-Z
+                "yaw": world_yaw,  # World-gripperyaw
+                "image_yaw": image_gripper_yaw,  # Beeldvlak-gripperyaw
+                "image_object_axis_yaw": image_object_axis_yaw,  # Beeldvlak-objectas
+                "axis_ratio": axis_ratio,  # Betrouwbaarheid objectas
+                "bbox": bbox,  # Bewaar boundingbox
+                "robot_pickable": False  # Initialiseer robotfilterstatus
             }
 
             obj["robot_pickable"] = self.is_robot_pickable(obj)  # Bepaal of object geschikt is voor robot
@@ -681,64 +914,105 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             color = (0, 255, 0) if obj["robot_pickable"] else (0, 165, 255)  # Groen is pickbaar, oranje is gefilterd
             cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), color, 2)  # Teken boundingbox
             cv2.putText(frame, f"{class_name} {confidence:.2f}", (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)  # Teken label
-            self.draw_yaw_axis(frame, bbox, image_yaw)  # Teken PCA-richting
+            self.draw_yaw_axis(frame, center_x, center_y, bbox, image_gripper_yaw, (0, 255, 255))  # Geel = gripperas haaks op objectas
+            self.draw_yaw_axis(frame, center_x, center_y, bbox, image_object_axis_yaw, (255, 0, 0))  # Blauw = echte langste objectas
 
         return (object_list, best_object, dataset_frame, frame)  # Geef objecten, beste object, datasetframe en gemarkeerd frame terug
 
     # =====================================================
-    # Draw PCA Yaw Axis
+    # Draw Yaw Axis
     # =====================================================
 
-    def draw_yaw_axis(self, frame, bbox, yaw):
+    def draw_yaw_axis(self, frame, center_x, center_y, bbox, yaw, color):
         x_min, y_min, x_max, y_max = bbox  # Lees bbox uit
-        center_x = int((x_min + x_max) / 2)  # Bereken bboxcentrum X
-        center_y = int((y_min + y_max) / 2)  # Bereken bboxcentrum Y
-        axis_length = int(min(x_max - x_min, y_max - y_min) * 0.4)  # Bepaal aslengte
-        end_x = int(center_x + axis_length * math.cos(yaw))  # Bereken eindpunt X
-        end_y = int(center_y + axis_length * math.sin(yaw))  # Bereken eindpunt Y
-        cv2.line(frame, (center_x, center_y), (end_x, end_y), (255, 0, 0), 2)  # Teken yaw-as
+        axis_length = int(min(x_max - x_min, y_max - y_min) * 0.45)  # Bepaal halve aslengte
+
+        dx = axis_length * math.cos(yaw)  # Bereken X-richting
+        dy = axis_length * math.sin(yaw)  # Bereken Y-richting
+
+        start_x = int(center_x - dx)  # Bereken startpunt X
+        start_y = int(center_y - dy)  # Bereken startpunt Y
+        end_x = int(center_x + dx)  # Bereken eindpunt X
+        end_y = int(center_y + dy)  # Bereken eindpunt Y
+
+        cv2.line(frame, (start_x, start_y), (end_x, end_y), color, 2)  # Teken volledige richtingloze as
 
     # =====================================================
-    # Process Object Request
+    # Process Stable Object Request
     # =====================================================
 
-    def process_object_request(self, timeout_sec):
-        packet_result = self.get_synced_packets(timeout_sec)  # Haal synced packets op
-        if packet_result is None:  # Controleer of packetset beschikbaar is
-            self.get_logger().warn("Object request failed: no synced packets available")  # Log ontbrekende packets
-            return None  # Stop zonder object
+    def process_stable_object_request(self):
+        measurements = []  # Lijst met geldige objectmetingen
+        end_time = time.monotonic() + OBJECT_SAMPLE_TIMEOUT_SEC  # Bepaal eindtijd voor complete sampleverzameling
 
-        nn_frame_packet, detection_packet, depth_packet = packet_result  # Pak packetset uit
-        frame = nn_frame_packet.getCvFrame()  # Haal NN-frame op
-        depth_frame = depth_packet.getFrame()  # Haal depthframe op
+        nn_frames = {}  # Buffer voor NN-frame packets
+        detections = {}  # Buffer voor detection packets
+        depths = {}  # Buffer voor depth packets
+        used_sequences = set()  # Set met reeds gebruikte sequence-nummers
 
-        self.get_logger().info(f"NN frame shape: {frame.shape}")  # Log RGB/NN-frameformaat
-        self.get_logger().info(f"Depth frame shape: {depth_frame.shape}")  # Log depthframeformaat
-        self.get_logger().info(f"Raw detections: {len(detection_packet.detections)}")  # Log aantal ruwe YOLO-detecties
+        while time.monotonic() < end_time and len(measurements) < OBJECT_SAMPLE_COUNT:  # Verzamel samples tot count of timeout
+            nn_frame_packet = self.nn_frame_queue.tryGet()  # Probeer een NN-frame packet te lezen
+            detection_packet = self.detection_queue.tryGet()  # Probeer een detection packet te lezen
+            depth_packet = self.depth_queue.tryGet()  # Probeer een depth packet te lezen
 
-        frame, calibrated = self.estimate_aruco_pose(frame)  # Bepaal ArUco world pose
+            if nn_frame_packet is not None:  # Controleer of er een NN-frame is ontvangen
+                nn_sequence = nn_frame_packet.getSequenceNum()  # Lees sequence number van NN-frame
+                nn_frames[nn_sequence] = nn_frame_packet  # Sla NN-frame op onder sequence number
+                self.last_rgb_frame_time = time.monotonic()  # Update watchdogtijd
 
-        if not calibrated:  # Controleer of world calibration gelukt is
-            self.get_logger().warn("Object request rejected: ArUco marker not detected")  # Log ontbrekende ArUco marker
-            return None  # Stop zonder object
+            if detection_packet is not None:  # Controleer of er detecties zijn ontvangen
+                detection_sequence = detection_packet.getSequenceNum()  # Lees sequence number van detecties
+                detections[detection_sequence] = detection_packet  # Sla detecties op onder sequence number
 
-        object_list, best_object, dataset_frame, marked_frame = self.process_frame_to_objects(frame, depth_frame, detection_packet.detections)  # Verwerk detecties naar objecten
+            if depth_packet is not None:  # Controleer of er een depthpacket is ontvangen
+                depth_sequence = depth_packet.getSequenceNum()  # Lees sequence number van depth
+                depths[depth_sequence] = depth_packet  # Sla depth op onder sequence number
 
-        if len(object_list) == 0:  # Controleer of er objecten over zijn
-            self.get_logger().warn("Object request failed: no valid objects with depth")  # Log geen geldige objecten
-            return None  # Stop zonder object
+            exact_sequences = set(nn_frames.keys()).intersection(detections.keys()).intersection(depths.keys())  # Zoek exact gelijke sequence numbers
+            available_sequences = sorted([sequence for sequence in exact_sequences if sequence not in used_sequences])  # Pak alleen ongebruikte matches
 
-        if SAVE_DATASET_ON_REQUEST:  # Controleer dataset trigger
-            self.save_dataset_sample(dataset_frame, object_list)  # Sla datasetopname op
+            for sequence in available_sequences:  # Loop door alle nieuwe exacte matches
+                used_sequences.add(sequence)  # Markeer sequence als gebruikt
 
-        self.publish_object_array(object_list)  # Publiceer alle objecten naar UI
+                if DEBUG_LOG_SYNC:  # Controleer of sync-debug gewenst is
+                    self.get_logger().info(f"Stable sample sequence={sequence}, " f"nn={nn_frames[sequence].getSequenceNum()}, " f"det={detections[sequence].getSequenceNum()}, " f"depth={depths[sequence].getSequenceNum()}")
 
-        if best_object is None:  # Controleer of robotgeschikt object bestaat
-            self.get_logger().warn("Object request failed: no robot-pickable object")  # Log geen robotobject
-            return None  # Stop zonder robotobject
+                best_object = self.process_synced_packets_to_best_object(  # Verwerk deze exacte packetset
+                    nn_frames[sequence],  # Geef NN-frame mee
+                    detections[sequence],  # Geef detecties mee
+                    depths[sequence],  # Geef depth mee
+                    save_dataset=False  # Sla niet elke sample apart op
+                )
 
-        self.marked_image_pub.publish(self.bridge.cv2_to_imgmsg(marked_frame, encoding="bgr8"))  # Publiceer gemarkeerd beeld
-        return best_object  # Geef beste object terug
+                if best_object is not None:  # Controleer of sample geldig is
+                    measurements.append(best_object)  # Voeg geldige meting toe
+
+                if len(measurements) >= OBJECT_SAMPLE_COUNT:  # Controleer of genoeg samples verzameld zijn
+                    break  # Stop for-loop
+
+            if len(nn_frames) > 20:  # Beperk buffergrootte
+                newest_sequences = sorted(nn_frames.keys())[-20:]  # Bewaar alleen nieuwste 20 sequences
+                nn_frames = {sequence: nn_frames[sequence] for sequence in newest_sequences}  # Snoei NN-buffer
+
+            if len(detections) > 20:  # Beperk detectiebuffer
+                newest_sequences = sorted(detections.keys())[-20:]  # Bewaar alleen nieuwste 20 sequences
+                detections = {sequence: detections[sequence] for sequence in newest_sequences}  # Snoei detectiebuffer
+
+            if len(depths) > 20:  # Beperk depthbuffer
+                newest_sequences = sorted(depths.keys())[-20:]  # Bewaar alleen nieuwste 20 sequences
+                depths = {sequence: depths[sequence] for sequence in newest_sequences}  # Snoei depthbuffer
+
+            time.sleep(0.005)  # Wacht kort om CPU-belasting te beperken
+
+        if len(measurements) == 0:  # Controleer of er geen enkele meting gelukt is
+            self.get_logger().warn("Stable object request failed: no valid samples")  # Log geen samples
+            return None  # Geef None terug
+
+        if len(measurements) < OBJECT_SAMPLE_COUNT:  # Controleer of er minder samples dan gewenst zijn
+            self.get_logger().warn(f"Stable object request has few samples: {len(measurements)}/{OBJECT_SAMPLE_COUNT}")  # Log weinig samples
+
+        combined_object = self.combine_object_measurements(measurements)  # Combineer alle geldige metingen
+        return combined_object  # Geef stabiel object terug
 
     # =====================================================
     # Publish Object Array
@@ -778,6 +1052,10 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
         )
 
         point_robot = rotation_robot_aruco @ point_marker + translation_robot_aruco  # Transformeer objectpunt van ArUco-frame naar robot-base-frame
+
+        if DEBUG_LOG_TRANSFORM_POINTS:  # Controleer of transformpunten gelogd moeten worden
+            self.get_logger().info(f"point_camera: x={float(point_camera[0, 0]):.4f}, " f"y={float(point_camera[1, 0]):.4f}, "f"z={float(point_camera[2, 0]):.4f}")
+            self.get_logger().info(f"point_marker: x={float(point_marker[0, 0]):.4f}, " f"y={float(point_marker[1, 0]):.4f}, " f"z={float(point_marker[2, 0]):.4f}")
 
         return (  # Geef positie terug als gewone Python floats
             float(point_robot[0, 0]),  # Geef robot-base X terug
@@ -847,12 +1125,8 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
             if len(exact_sequences) > 0:  # Controleer of exacte synchronisatie bestaat
                 sequence = max(exact_sequences)  # Pak de nieuwste exacte sequence
-                self.get_logger().info(  # Log gebruikte sequence voor debug
-                    f"Synced packets sequence={sequence}, "
-                    f"nn={nn_frames[sequence].getSequenceNum()}, "
-                    f"det={detections[sequence].getSequenceNum()}, "
-                    f"depth={depths[sequence].getSequenceNum()}"
-                )
+                if DEBUG_LOG_SYNC:  # Controleer of sync-debug gewenst is
+                    self.get_logger().info(f"Synced packets sequence={sequence}, " f"nn={nn_frames[sequence].getSequenceNum()}, " f"det={detections[sequence].getSequenceNum()}, " f"depth={depths[sequence].getSequenceNum()}")
                 return (nn_frames[sequence], detections[sequence], depths[sequence])  # Geef exact gesynchroniseerde packets terug
 
             time.sleep(0.005)  # Wacht kort om CPU-belasting te beperken
@@ -880,6 +1154,20 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                 time.sleep(WATCHDOG_INTERVAL_SEC)  # Voorkom snelle foutlus
 
     # =====================================================
+    # Rvec Rotation Difference
+    # =====================================================
+
+    def calculate_rvec_rotation_difference(self, rvec_a, rvec_b):
+        rotation_a, _ = cv2.Rodrigues(rvec_a)  # Zet eerste rvec om naar rotatiematrix
+        rotation_b, _ = cv2.Rodrigues(rvec_b)  # Zet tweede rvec om naar rotatiematrix
+        rotation_delta = rotation_a @ rotation_b.T  # Bereken relatieve rotatie tussen beide poses
+        trace_value = float(np.trace(rotation_delta))  # Lees trace van relatieve rotatiematrix
+        cosine_value = (trace_value - 1.0) / 2.0  # Zet trace om naar cosinus van rotatiehoek
+        cosine_value = max(-1.0, min(1.0, cosine_value))  # Clamp voor numerieke veiligheid
+        rotation_difference = math.acos(cosine_value)  # Bereken echte rotatiehoek in radialen
+        return rotation_difference  # Geef fysieke rotatieverschilhoek terug
+
+    # =====================================================
     # Object Request Callback
     # =====================================================
 
@@ -901,13 +1189,17 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
             self.confidence_threshold = float(request.confidence_threshold)  # Lees confidencegrens uit request
             self.get_logger().info("Object request received")  # Log nieuwe aanvraag
-            best_object = self.process_object_request(timeout_sec=2.0)  # Verwerk één objectaanvraag
-
+            best_object = self.process_stable_object_request()  # Verwerk meerdere samples tot één stabiel object
             if best_object is None:  # Controleer of object gevonden is
                 response.success = False  # Markeer response als mislukt
                 return response  # Geef response terug
 
             best_object_msg = self.convert_to_ros_msg(best_object)  # Converteer beste object naar ROS-message
+
+            ui_msg = ObjectDataArray()  # Maak UI-array message
+            ui_msg.objects = [best_object_msg]  # Zet alleen het definitieve gecombineerde object in de UI-array
+            self.object_ui_pub.publish(ui_msg)  # Publiceer één UI-message per service request
+
             self.object_L6_pub.publish(best_object_msg)  # Publiceer beste object op debugtopic
             response.success = True  # Markeer response als geslaagd
             response.object = best_object_msg  # Vul response objectveld
@@ -1107,21 +1399,33 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
 def main(args=None):
     rclpy.init(args=args)  # Initialiseer ROS2
-    node = VisionNode()  # Maak VisionNode aan
+    node = None  # Initialiseer node als None zodat finally veilig blijft
+
     try:
+        node = VisionNode()  # Maak VisionNode aan
         rclpy.spin(node)  # Laat ROS2 node draaien
+
     except KeyboardInterrupt:
         pass  # Stop netjes bij Ctrl+C
+
     finally:
-        node.running = False  # Stop normale verwerking
-        node.watchdog_running = False  # Stop watchdogthread
-        try:
-            if node.device is not None:  # Controleer of device open is
-                node.device.close()  # Sluit DepthAI-device
-        except Exception:
-            pass  # Negeer sluitfouten
-        node.destroy_node()  # Vernietig ROS2 node
-        rclpy.shutdown()  # Sluit ROS2 af
+        if node is not None:  # Controleer of node bestaat
+            node.running = False  # Stop normale verwerking
+            node.watchdog_running = False  # Stop watchdogthread
+
+            try:
+                if node.device is not None:  # Controleer of device open is
+                    node.device.close()  # Sluit DepthAI-device
+            except Exception:
+                pass  # Negeer sluitfouten
+
+            try:
+                node.destroy_node()  # Vernietig ROS2 node
+            except Exception:
+                pass  # Negeer destroy-fouten tijdens shutdown
+
+        if rclpy.ok():  # Controleer of ROS2-context nog actief is
+            rclpy.shutdown()  # Sluit ROS2 alleen af als dat nog niet gebeurd is
 
 if __name__ == "__main__":
     main()  # Start main wanneer bestand direct wordt uitgevoerd
