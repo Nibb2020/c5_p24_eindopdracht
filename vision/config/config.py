@@ -73,12 +73,14 @@ OBJECT_MAX_YAW_STD_RAD = 0.08  # Maximale yaw-spreiding in radialen voor betrouw
 
 SAVE_DATASET_ON_REQUEST = False  # Sla datasetopname op bij succesvolle objectrequest
 DATASET_FOLDER = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/dataset"  # Datasetbasispad
+DATASET_FOLDER = "/home/student/P4_C5_project_ws/src/c5_p24_eindopdracht/vision/dataset"
 
 # ==================================================
 # Model
 # ==================================================
 Version = "V0.5"
 MODEL_PATH = f"/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/{Version}/best_openvino_2022.1_3shave.blob"  # Pad naar YOLO-model
+MODEL_PATH = f"/home/student/P4_C5_project_ws/src/c5_p24_eindopdracht/vision/models/{Version}/best_openvino_2022.1_3shave.blob"  # Pad naar YOLO-model
 
 # ==================================================
 # YOLO
@@ -114,8 +116,8 @@ ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50  # ArUco dictionary voor markerherkenni
 ARUCO_MAX_REPROJECTION_ERROR_PX = 3.0  # Maximale toegestane reprojection error voor ArUco-pose in pixels
 ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojection error en sprongen
 
-ARUCO_WORLD_X = 0.712       # World X-positie van markerorigin
-ARUCO_WORLD_Y = 0.277       # World Y-positie van markerorigin
+ARUCO_WORLD_X = 0.069       # World X-positie van markerorigin
+ARUCO_WORLD_Y = 0.238       # World Y-positie van markerorigin
 ARUCO_WORLD_Z = 0.08      # World Z-positie van markerorigin
 
 CAMERA_MATRIX = np.array([
@@ -128,9 +130,9 @@ DIST_COEFFS = np.array([0.1502961560, -0.9671998692, -0.0037365286, 0.0022325322
 
 ARUCO_TO_ROBOT_ROTATION = np.array(
     [
-        [0.0, 1.0, 0.0],
         [1.0, 0.0, 0.0],
-        [0.0, 0.0, -1.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
     ],
     dtype=np.float64
 )
