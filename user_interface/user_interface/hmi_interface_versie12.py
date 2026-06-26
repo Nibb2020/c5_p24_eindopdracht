@@ -13,6 +13,7 @@ from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger, SetBool
+from project_interfaces.msg import ObjectDataArray
 
 
 
@@ -42,6 +43,20 @@ class HumanInterface(Node):
         self.pending_reset = False
         self.pending_retry = False
 
+        # ================= OBJECTTELLER =================
+        # Use the exact lowercase class names published by vision.
+        self.vaste_klassen = ["dino", "schip", "olifant", "smiley"]
+
+        self.gesorteerde_tellers = {object_class: 0 for object_class in self.vaste_klassen}
+
+        self.ui_teller_labels = {}
+
+        # Previous ObjectDataArray converted to class and position.
+        self.vorige_vision_objecten = None
+
+        # Maximum XY movement for considering two detections the same object.
+        self.object_match_afstand = 0.01
+
         # ================= ROS2 CONFIGURATIE =================
         #publishers
         self.pub_start_stop = self.create_publisher(Bool, "/ui/start_stop", 10)
@@ -50,6 +65,7 @@ class HumanInterface(Node):
         self.sub_robot_status = self.create_subscription(String,"/controller/state",self.robot_status_callback,10)
         self.sub_robot_warning = self.create_subscription(String,"/controller/warning",self.robot_warning_callback,10)
         self.sub_robot_error = self.create_subscription(String,"/controller/error",self.robot_error_callback,10)
+        self.sub_vision_data = self.create_subscription(ObjectDataArray,"/vision/object_data_ui",self.vision_data_callback,10)
 
         #clients
         self.cli_reset = self.create_client(Trigger,"/ui/reset_error")
@@ -153,6 +169,39 @@ class HumanInterface(Node):
         self.btn_set_threshold = tk.Button(self.vision_settings_frame,text="Toepassen",command=self.update_remote_threshold)
         self.btn_set_threshold.pack(side=tk.LEFT,padx=(0,15))
 
+        # ================= VISUELE OBJECTTELLER =================
+        self.stats_frame = tk.LabelFrame(
+            self.control_panel,
+            text="Sorteerstatistieken",
+            font=("Arial", 11, "bold"),
+            fg="blue"
+        )
+        self.stats_frame.pack(fill=tk.X, pady=(0, 15), padx=5)
+
+        for object_class in self.vaste_klassen:
+            row_frame = tk.Frame(self.stats_frame)
+            row_frame.pack(fill=tk.X, padx=15, pady=2)
+
+            lbl_naam = tk.Label(
+                row_frame,
+                text=f"{object_class.capitalize()}:",
+                font=("Arial", 10),
+                anchor="w"
+            )
+            lbl_naam.pack(side=tk.LEFT)
+
+            lbl_aantal = tk.Label(
+                row_frame,
+                text="0",
+                font=("Arial", 10, "bold"),
+                fg="black",
+                width=5,
+                anchor="e"
+            )
+            lbl_aantal.pack(side=tk.RIGHT)
+
+            self.ui_teller_labels[object_class] = lbl_aantal
+
         self.log_frame = tk.Frame(self.control_panel)
         self.log_frame.pack(fill=tk.BOTH, expand=True)
 
@@ -214,6 +263,154 @@ class HumanInterface(Node):
             return
 
         self.root.after(0,lambda text=error: self.update_ui_log(f"[ERROR] {text}"))
+
+    def _maak_vision_snapshot(self, msg: ObjectDataArray):
+        snapshot = []
+
+        for obj in msg.objects:
+            object_class = obj.object_class.strip().casefold()
+
+            if object_class not in self.gesorteerde_tellers:
+                self.get_logger().warning(
+                    f"Onbekende vision-klasse ontvangen: '{obj.object_class}'"
+                )
+                continue
+
+            translation = obj.transform.transform.translation
+
+            snapshot.append({
+                "class": object_class,
+                "x": float(translation.x),
+                "y": float(translation.y),
+            })
+
+        return snapshot
+    
+    def _bereken_xy_afstand(self, object_a, object_b):
+        verschil_x = object_a["x"] - object_b["x"]
+        verschil_y = object_a["y"] - object_b["y"]
+
+        return (verschil_x ** 2 + verschil_y ** 2) ** 0.5
+    
+    def _zoek_verdwenen_objecten(self, vorige_objecten, huidige_objecten):
+        mogelijke_matches = []
+
+        for vorige_index, vorig_object in enumerate(vorige_objecten):
+            for huidige_index, huidig_object in enumerate(huidige_objecten):
+                if vorig_object["class"] != huidig_object["class"]:
+                    continue
+
+                afstand = self._bereken_xy_afstand(
+                    vorig_object,
+                    huidig_object
+                )
+
+                if afstand <= self.object_match_afstand:
+                    mogelijke_matches.append(
+                        (
+                            afstand,
+                            vorige_index,
+                            huidige_index,
+                        )
+                    )
+
+        # Use the smallest distances first.
+        mogelijke_matches.sort(key=lambda match: match[0])
+
+        gekoppelde_vorige_indices = set()
+        gekoppelde_huidige_indices = set()
+
+        for afstand, vorige_index, huidige_index in mogelijke_matches:
+            if vorige_index in gekoppelde_vorige_indices:
+                continue
+
+            if huidige_index in gekoppelde_huidige_indices:
+                continue
+
+            gekoppelde_vorige_indices.add(vorige_index)
+            gekoppelde_huidige_indices.add(huidige_index)
+
+        verdwenen_objecten = []
+
+        for vorige_index, vorig_object in enumerate(vorige_objecten):
+            if vorige_index not in gekoppelde_vorige_indices:
+                verdwenen_objecten.append(vorig_object)
+
+        nieuwe_objecten = []
+
+        for huidige_index, huidig_object in enumerate(huidige_objecten):
+            if huidige_index not in gekoppelde_huidige_indices:
+                nieuwe_objecten.append(huidig_object)
+
+        return verdwenen_objecten, nieuwe_objecten
+
+    def vision_data_callback(self, msg: ObjectDataArray):
+        huidige_objecten = self._maak_vision_snapshot(msg)
+
+        # The first message only establishes the baseline.
+        if self.vorige_vision_objecten is None:
+            self.vorige_vision_objecten = huidige_objecten
+
+            self.root.after(0,lambda aantal=len(huidige_objecten):self.update_ui_log(f"[TELLER] Beginmeting opgeslagen met {aantal} objecten."))
+            return
+
+        verdwenen_objecten, nieuwe_objecten = (
+            self._zoek_verdwenen_objecten(
+                self.vorige_vision_objecten,
+                huidige_objecten
+            )
+        )
+
+        verdwenen_per_klasse = {}
+
+        for verdwenen_object in verdwenen_objecten:
+            object_class = verdwenen_object["class"]
+
+            verdwenen_per_klasse[object_class] = (
+                verdwenen_per_klasse.get(object_class, 0) + 1
+            )
+
+        for object_class, aantal_verdwenen in verdwenen_per_klasse.items():
+            self.gesorteerde_tellers[object_class] += aantal_verdwenen
+            nieuw_totaal = self.gesorteerde_tellers[object_class]
+
+            self.root.after(
+                0,
+                lambda klasse=object_class,
+                    verschil=aantal_verdwenen,
+                    totaal=nieuw_totaal:
+                    self._verwerk_vision_telling(
+                        klasse,
+                        verschil,
+                        totaal
+                    )
+            )
+
+        if nieuwe_objecten:
+            nieuwe_per_klasse = {}
+
+            for nieuw_object in nieuwe_objecten:
+                object_class = nieuw_object["class"]
+
+                nieuwe_per_klasse[object_class] = (
+                    nieuwe_per_klasse.get(object_class, 0) + 1
+                )
+
+            beschrijving = ", ".join(
+                f"{object_class}: {aantal}"
+                for object_class, aantal in nieuwe_per_klasse.items()
+            )
+
+            self.root.after(
+                0,
+                lambda tekst=beschrijving:
+                    self.update_ui_log(
+                        f"[TELLER] Nieuwe objecten gezien: {tekst}"
+                    )
+            )
+
+        self.vorige_vision_objecten = huidige_objecten
+
     # =====================================================
     # UITGAANDE COMMUNICATIE (Publishers & Services)
     # =====================================================
@@ -608,6 +805,14 @@ class HumanInterface(Node):
         self.ui_reset_pressed = False
         self.ui_start_stop_active = False
         self.ui_training_inference_active = False
+        self.vorige_vision_objecten = None
+        for object_class in self.vaste_klassen:
+            self.gesorteerde_tellers[object_class] = 0
+
+            label = self.ui_teller_labels.get(object_class)
+
+            if label is not None:
+                label.config(text="0", fg="black")
 
         self._set_buttons_state("normal")
         self._wissel_ui_modus(naar_training=False)
@@ -622,10 +827,38 @@ class HumanInterface(Node):
         self.reset.config(bg="lightgray")
         self.training.config(bg="blue",fg="white",state="normal")
 
+        self.update_ui_log("[HMI] Reset voltooid. Controller staat stand-by. Tellers zijn gewist.")
+
+    def _verwerk_vision_telling(self,object_class,aantal_verdwenen,totaal):
         self.update_ui_log(
-            "[HMI] Reset voltooid. "
-            "Controller staat stand-by."
+            f"[TELLER] {aantal_verdwenen}x "
+            f"{object_class.upper()} verdwenen. "
+            f"Gesorteerd totaal: {totaal}"
         )
+
+        self.update_tkinter_teller_display(
+            object_class,
+            totaal
+        )
+
+    def update_tkinter_teller_display(self,object_class,aantal):
+        label = self.ui_teller_labels.get(object_class)
+
+        if label is None:
+            return
+
+        label.config(
+            text=str(aantal),
+            fg="green"
+        )
+
+        self.root.after(1000, lambda klasse=object_class:  self._reset_label_kleur(klasse))
+
+    def _reset_label_kleur(self, object_class):
+        label = self.ui_teller_labels.get(object_class)
+
+        if label is not None:
+            label.config(fg="black")
 
     def update_ui_log(self, msg):
         self.log.config(state="normal")
