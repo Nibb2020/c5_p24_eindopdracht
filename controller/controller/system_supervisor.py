@@ -37,57 +37,93 @@ class SystemSupervisor(Node):
         # Prevents two restart requests from running at the same time.
         self.restart_active = False
 
+        # Prevents logging while shutting down
+        self.is_shutting_down = False
+
         # ================= PARAMETERS =================
-        # Workspace that contains the built ROS 2 installation.
         self.declare_parameter(
             "workspace_path",
             "/home/student/c5_p24_eindproject_ws",
         )
 
-        # Package and launch file used to start the robot and manipulator.
         self.declare_parameter(
             "restart_launch_package",
             "controller",
         )
+
         self.declare_parameter(
             "restart_launch_file",
             "robot_and_manipulator.launch.py",
         )
 
-        # Time given to the launch process to prove that it stays running.
         self.declare_parameter(
             "startup_check_time",
             5.0,
         )
 
-        # Maximum time given to a normal SIGINT shutdown.
         self.declare_parameter(
             "shutdown_timeout",
             12.0,
         )
 
-        # Read the declared ROS 2 parameters once and store them locally.
+        self.declare_parameter(
+            "shutdown_timeout_on_exit",
+            3.0,
+        )
+
+        self.declare_parameter(
+            "sigterm_timeout_on_exit",
+            1.0,
+        )
+
+        self.declare_parameter(
+            "sigkill_timeout_on_exit",
+            1.0,
+        )
+
         self.workspace_path = str(
             self.get_parameter("workspace_path").value
         )
+
         self.restart_launch_package = str(
             self.get_parameter(
                 "restart_launch_package"
             ).value
         )
+
         self.restart_launch_file = str(
             self.get_parameter(
                 "restart_launch_file"
             ).value
         )
+
         self.startup_check_time = float(
             self.get_parameter(
                 "startup_check_time"
             ).value
         )
+
         self.shutdown_timeout = float(
             self.get_parameter(
                 "shutdown_timeout"
+            ).value
+        )
+
+        self.shutdown_timeout_on_exit = float(
+            self.get_parameter(
+                "shutdown_timeout_on_exit"
+            ).value
+        )
+
+        self.sigterm_timeout_on_exit = float(
+            self.get_parameter(
+                "sigterm_timeout_on_exit"
+            ).value
+        )
+
+        self.sigkill_timeout_on_exit = float(
+            self.get_parameter(
+                "sigkill_timeout_on_exit"
             ).value
         )
 
@@ -233,8 +269,12 @@ class SystemSupervisor(Node):
     # STOP MANAGED LAUNCH PROCESS
     # =====================================================
 
-    def stop_system_locked(self) -> None:
-        # The caller must hold process_lock before entering this function.
+    def stop_system_locked(
+        self,
+        sigint_timeout: Optional[float] = None,
+        sigterm_timeout: float = 5.0,
+        sigkill_timeout: float = 3.0,
+    ) -> None:
         if not self.process_is_running(
             self.system_process
         ):
@@ -243,62 +283,79 @@ class SystemSupervisor(Node):
 
         process = self.system_process
 
-        self.get_logger().warning(
-            "Stopping robot and manipulator launch"
-        )
+        if sigint_timeout is None:
+            sigint_timeout = self.shutdown_timeout
+
+        if not self.is_shutting_down:
+            self.get_logger().warning(
+                "Stopping robot and manipulator launch"
+            )
 
         try:
-            # Obtain the process group created by start_new_session=True.
             process_group = os.getpgid(process.pid)
 
-            # First attempt: graceful ROS shutdown, similar to pressing Ctrl+C.
             os.killpg(
                 process_group,
                 signal.SIGINT,
             )
 
-            process.wait(
-                timeout=self.shutdown_timeout
-            )
+            try:
+                process.wait(
+                    timeout=sigint_timeout
+                )
 
-            self.get_logger().info(
-                "Robot and manipulator launch stopped"
-            )
+                if not self.is_shutting_down:
+                    self.get_logger().info(
+                        "Robot and manipulator launch stopped"
+                    )
+                return
 
-        except subprocess.TimeoutExpired:
-            self.get_logger().warning(
-                "Launch did not stop after SIGINT"
-            )
+            except subprocess.TimeoutExpired:
+                if not self.is_shutting_down:
+                    self.get_logger().warning(
+                        "Launch did not stop after SIGINT"
+                    )
 
             try:
-                # Second attempt: request normal process termination.
                 os.killpg(
-                    os.getpgid(process.pid),
+                    process_group,
                     signal.SIGTERM,
                 )
 
-                process.wait(timeout=5.0)
+                process.wait(
+                    timeout=sigterm_timeout
+                )
+
+                self.get_logger().warning(
+                    "Robot and manipulator launch stopped after SIGTERM"
+                )
+                return
 
             except subprocess.TimeoutExpired:
                 self.get_logger().error(
-                    "Forcing launch process to stop"
+                    "Launch did not stop after SIGTERM"
                 )
 
-                try:
-                    # Final attempt: force the full process group to stop.
-                    os.killpg(
-                        os.getpgid(process.pid),
-                        signal.SIGKILL,
-                    )
+            try:
+                os.killpg(
+                    process_group,
+                    signal.SIGKILL,
+                )
 
-                    process.wait(timeout=3.0)
+                process.wait(
+                    timeout=sigkill_timeout
+                )
 
-                except ProcessLookupError:
-                    # The process already stopped between checking and signalling.
-                    pass
+                self.get_logger().error(
+                    "Robot and manipulator launch was killed"
+                )
+
+            except subprocess.TimeoutExpired:
+                self.get_logger().error(
+                    "Launch process did not stop after SIGKILL"
+                )
 
         except ProcessLookupError:
-            # The process already stopped before its process group was accessed.
             pass
 
         except Exception as exception:
@@ -307,7 +364,6 @@ class SystemSupervisor(Node):
             )
 
         finally:
-            # Forget the old process after every completed stop attempt.
             self.system_process = None
 
     # =====================================================
@@ -373,9 +429,14 @@ class SystemSupervisor(Node):
     # =====================================================
 
     def destroy_node(self):
-        # Stop the managed launch process before destroying the supervisor.
+        self.is_shutting_down = True
+
         with self.process_lock:
-            self.stop_system_locked()
+            self.stop_system_locked(
+                sigint_timeout=self.shutdown_timeout_on_exit,
+                sigterm_timeout=self.sigterm_timeout_on_exit,
+                sigkill_timeout=self.sigkill_timeout_on_exit,
+            )
 
         return super().destroy_node()
 
@@ -406,11 +467,17 @@ def main(args=None) -> None:
         pass
 
     finally:
-        if executor is not None:
-            executor.shutdown()
+        if node is not None and executor is not None:
+            try:
+                executor.remove_node(node)
+            except Exception:
+                pass
 
         if node is not None:
             node.destroy_node()
+
+        if executor is not None:
+            executor.shutdown()
 
         if rclpy.ok():
             rclpy.shutdown()

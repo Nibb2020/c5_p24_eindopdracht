@@ -8,45 +8,105 @@ Vision Node
 Package:
     vision
 
-ROS2:
-    Jazzy
+Environment:
+    - ROS2 Jazzy
+    - Python 3.12
+    - DepthAI 2.29.0.0
+    - Luxonis OAK-D via USB HIGH
 
-DepthAI:
-    2.29.0
+Purpose:
+    Deze node gebruikt de OAK-D camera om objecten te detecteren, hun
+    3D-positie en yaw te bepalen, en deze objectdata beschikbaar te maken
+    voor de xArm Lite6 manipulator en de UI.
 
-Responsibilities:
-    - OAK-D connection
-    - USB HIGH enforcement
-    - Device information logging
-    - Auto reconnect
-    - RGB stream
-    - Service interface
-    - UI publisher
-    - Future:
-        * Stereo depth
-        * YOLOv8n
-        * ArUco calibration
-        * PCA yaw
-        * Dataset logging
-        * Lite 6 integration
+Main Flow:
+    1. Start een DepthAI pipeline met RGB, stereo depth en optioneel YOLO.
+    2. Detecteert objecten met YOLO en bepaalt de objectpositie via depth-ROI.
+    3. Detecteert een vaste ArUco-marker als referentie voor het robot/world-frame.
+    4. Transformeert de objectpositie:
+           camera-frame -> ArUco-frame -> robot/world-frame
+    5. Bepaalt de object-/gripperyaw met klassieke beeldverwerking en PCA.
+    6. Combineert meerdere samples tot één stabiele objectmeting.
+    7. Publiceert het beste object, een ObjectDataArray en een gemarkeerd debugbeeld.
+
+ROS Interfaces:
+    Service:
+        - project_interfaces/srv/GetObjectData
+        - Naam ingesteld via SERVICE_NAME in config.py
+
+    Publishers:
+        - ObjectDataArray richting UI via UI_TOPIC
+        - ObjectData richting Lite6/debug via LITE6_RESULT_TOPIC
+        - sensor_msgs/Image gemarkeerd beeld via MARKED_IMAGE_TOPIC
+
+ObjectData Output:
+    - object_class:
+        YOLO-klassenaam
+    - object_id:
+        uniek UUID
+    - confidence:
+        gemiddelde confidence van de gebruikte samples
+    - transform.translation:
+        objectpositie in robot/world-frame
+    - transform.rotation.z:
+        pure yaw in radialen, geen quaternion
+    - transform.rotation.x/y/w:
+        0.0
+
+Key Config Values:
+    Belangrijkste instellingen staan in config.py:
+        - USE_YOLO
+        - MODEL_PATH
+        - YOLO_CLASS_NAMES
+        - USE_DEVICE_CALIBRATION
+        - CAMERA_MATRIX / DIST_COEFFS
+        - ARUCO_MARKER_ID / ARUCO_SIZE_M
+        - ARUCO_TO_ROBOT_ROTATION
+        - ARUCO_WORLD_X / ARUCO_WORLD_Y / ARUCO_WORLD_Z
+        - OBJECT_SAMPLE_COUNT / OBJECT_SAMPLE_TIMEOUT_SEC
+        - ROBOT_FILTER_ENABLED en robot-grenzen
+
+Minimum Requirements:
+    - Ubuntu met ROS2 Jazzy
+    - Python 3.12 virtual environment:
+        ~/c5_p24_eindproject_ws/.venv
+    - depthai==2.29.0.0
+    - opencv-contrib-python
+    - numpy
+    - cv_bridge
+    - project_interfaces en vision gebouwd in dezelfde workspace
+    - OAK-D verbonden met de VM
+    - ArUco-marker zichtbaar voor objectaanvragen
+    - Geldig YOLO .blob model wanneer USE_YOLO=True
+
+Build and Run:
+    cd ~/c5_p24_eindproject_ws
+    source /opt/ros/jazzy/setup.bash
+    source .venv/bin/activate
+    source install/setup.bash
+
+    python3 -m colcon build \
+      --packages-select vision \
+      --symlink-install \
+      --allow-overriding project_interfaces
+
+    source install/setup.bash
+    ros2 launch vision vision.launch.py
+
+Useful Debug Commands:
+    python3 -c "import depthai as dai; print(dai.__version__)"
+    ros2 topic list | grep image
+    ros2 run rqt_image_view rqt_image_view
+    ros2 service list
+    ros2 service call <SERVICE_NAME> project_interfaces/srv/GetObjectData "{confidence_threshold: 0.5}"
 
 Author:
     Hessel / ChatGPT
+
+License:
+    Apache 2.0
+
 =========================================================
-
-cd ~/c5_p24_eindproject_ws
-source /opt/ros/jazzy/setup.bash
-source .venv/bin/activate
-source install/setup.bash
-
-python3 -m colcon build \
-  --packages-select vision \
-  --symlink-install \
-  --allow-overriding project_interfaces
-
-source install/setup.bash
-ros2 launch vision vision.launch.py
-
 """
 
 # =========================================================
@@ -265,7 +325,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             detection_nn.setAnchors([])  # Gebruik lege anchors volgens huidige YOLO-config
             detection_nn.setAnchorMasks({})  # Gebruik lege anchor masks volgens huidige YOLO-config
             detection_nn.setIouThreshold(YOLO_IOU_THRESHOLD)  # Zet IOU/NMS-threshold vanuit config.py
-            detection_nn.setBlobPath(MODEL_PATH)  # Laad het DepthAI v2 .blob modelbestand
+            detection_nn.setBlobPath(str(MODEL_PATH))  # Laad het DepthAI v2 .blob modelbestand
 
             xout_det.setStreamName('detections')  # Geef detection-outputstream een naam
             xout_nn_frame.setStreamName('nn_frame')  # Geef NN-frame stream een naam
@@ -807,7 +867,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # Process Stable Object Request
     # =====================================================
 
-    def process_synced_packets_to_best_object(self, nn_frame_packet, detection_packet, depth_packet, save_dataset=False):
+    def process_synced_packets_to_best_object(self, nn_frame_packet, detection_packet, depth_packet, save_dataset):
         frame = nn_frame_packet.getCvFrame()  # Haal NN-frame op
         depth_frame = depth_packet.getFrame()  # Haal depthframe op
 
@@ -883,7 +943,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
             cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)  # Teken optisch zwaartepunt rood
 
-            world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_gripper_yaw)  # Transformeer gripperrichting naar world-yaw
+            world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_object_axis_yaw)  # Transformeer gripperrichting naar world-yaw
             world_x, world_y, world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer optisch zwaartepunt naar world-positie
 
             obj = {  # Bouw intern objectrecord
