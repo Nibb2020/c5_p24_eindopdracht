@@ -1,4 +1,4 @@
-# C5 P24 Eindopdracht — Visiongestuurde pick-and-place met ROS2
+# C5 P24 Eindopdracht
 
 Deze repository bevat het ROS2-systeem voor de C5 P24 eindopdracht. Het project combineert objectdetectie, 3D-positiebepaling, robotaansturing en een gebruikersinterface tot één geïntegreerd systeem.
 
