@@ -86,7 +86,7 @@ class manipulatorController(Node):
 
     def move_to_pose(self, translation, yaw):
         roll = 3.14159      #180 graden
-        pitch = 0.1396    #8 graden
+        pitch = 0#.1396    #8 graden
         rotation = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
 
         self.get_logger().info(f"Moving to pose: {translation}, {rotation}")

@@ -142,9 +142,9 @@ ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50  # ArUco dictionary voor markerherkenni
 ARUCO_MAX_REPROJECTION_ERROR_PX = 3.0  # Maximale toegestane reprojection error voor ArUco-pose in pixels
 ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojection error en sprongen
 
-ARUCO_WORLD_X = 0.0712       # World X-positie van markerorigin
-ARUCO_WORLD_Y = 0.277       # World Y-positie van markerorigin
-ARUCO_WORLD_Z = 0.08      # World Z-positie van markerorigin
+ARUCO_WORLD_X = 0.05       # World X-positie van markerorigin
+ARUCO_WORLD_Y = 0.2575       # World Y-positie van markerorigin
+ARUCO_WORLD_Z = 0.18      # World Z-positie van markerorigin
 
 CAMERA_MATRIX = np.array([
     [919.80036341, 0.00000000, 321.10036797],
