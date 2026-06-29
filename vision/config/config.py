@@ -1,5 +1,6 @@
 import cv2 
 import numpy as np
+from pathlib import Path
 
 # ==================================================
 # Debug
@@ -11,10 +12,50 @@ DEBUG_DRAW_ARUCO_LIVE = True  # True = ArUco tekenen in debugbeeld, False = live
 DEBUG_LOG_DEVICE_INFO = True  # Print OAK-D device info bij opstarten
 DEBUG_LOG_SYNC = False  # Print synced packet sequence nummers
 DEBUG_LOG_FRAME_INFO = False  # Print framevormen en aantal ruwe detecties
-DEBUG_LOG_ARUCO_POSE = False  # Print ArUco rvec/tvec/reprojection details
+DEBUG_LOG_ARUCO_POSE = True  # Print ArUco rvec/tvec/reprojection details
 DEBUG_LOG_TRANSFORM_POINTS = False  # Print point_camera en point_marker
 DEBUG_LOG_SAMPLE_RESULT = True  # Print alleen eindresultaat per service request
 DEBUG_LOG_REJECTED_SAMPLES = False  # Print geweigerde samples tijdens stabiele meting
+
+# ==================================================
+# Package Paths
+# ==================================================
+
+CONFIG_FILE = Path(__file__).resolve()  # Absoluut pad naar deze config.py
+VISION_PACKAGE_DIR = CONFIG_FILE.parents[1]  # Pad naar de vision package source-map
+DATASET_DIR = VISION_PACKAGE_DIR / "dataset"  # Datasetmap binnen de vision package
+MODELS_DIR = VISION_PACKAGE_DIR / "models"  # Models-map binnen de vision package
+
+# ==================================================
+# Dataset
+# ==================================================
+
+SAVE_DATASET_ON_REQUEST = False  # Sla datasetopname op bij succesvolle objectrequest
+DATASET_FOLDER = DATASET_DIR  # Datasetbasispad binnen de vision package
+
+# ==================================================
+# Model
+# ==================================================
+
+MODEL_VERSION = "V0.5"  # Actieve modelversie
+MODEL_VERSION_DIR =  VISION_PACKAGE_DIR / "models" / MODEL_VERSION  # Map waarin het .blob model van deze versie staat
+
+def find_blob_model(model_version_dir: Path) -> Path:
+    if not model_version_dir.exists():  # Controleer of de modelversiemap bestaat
+        raise FileNotFoundError(f"Model version folder does not exist: {model_version_dir}")  # Geef duidelijke foutmelding
+
+    blob_files = sorted(model_version_dir.glob("*.blob"))  # Zoek alle .blob bestanden in de modelversiemap
+
+    if len(blob_files) == 0:  # Controleer of er minimaal één .blob bestand bestaat
+        raise FileNotFoundError(f"No .blob model found in: {model_version_dir}")  # Geef duidelijke foutmelding
+
+    if len(blob_files) > 1:  # Controleer of er niet meerdere modellen in dezelfde versie staan
+        raise RuntimeError(f"Multiple .blob models found in {model_version_dir}: {blob_files}")  # Voorkom verkeerde modelkeuze
+
+    return blob_files[0]  # Geef het enige gevonden model terug
+
+
+MODEL_PATH = find_blob_model(MODEL_VERSION_DIR)  # Selecteer automatisch het .blob model
 
 # ==================================================
 # Camera
@@ -68,21 +109,6 @@ OBJECT_MAX_POSITION_STD_M = 0.002  # Maximale standaarddeviatie in meters voor b
 OBJECT_MAX_YAW_STD_RAD = 0.08  # Maximale yaw-spreiding in radialen voor betrouwbare rotatiemeting
 
 # ==================================================
-# Dataset
-# ==================================================
-
-SAVE_DATASET_ON_REQUEST = False  # Sla datasetopname op bij succesvolle objectrequest
-DATASET_FOLDER = "/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/dataset"  # Datasetbasispad
-DATASET_FOLDER = "/home/student/P4_C5_project_ws/src/c5_p24_eindopdracht/vision/dataset"
-
-# ==================================================
-# Model
-# ==================================================
-Version = "V0.5"
-MODEL_PATH = f"/home/student/c5_p24_eindproject_ws/src/c5_p24_eindopdracht/vision/models/{Version}/best_openvino_2022.1_3shave.blob"  # Pad naar YOLO-model
-MODEL_PATH = f"/home/student/P4_C5_project_ws/src/c5_p24_eindopdracht/vision/models/{Version}/best_openvino_2022.1_3shave.blob"  # Pad naar YOLO-model
-
-# ==================================================
 # YOLO
 # ==================================================
 
@@ -110,14 +136,14 @@ YOLO_CLASS_NAMES = {  # Mapping van class-ID naar klassenaam
 # ==================================================
 
 ARUCO_MARKER_ID = 0  # ID van de vaste world-reference marker
-ARUCO_SIZE_M = 0.07356  # Fysieke markermaat in meters
+ARUCO_SIZE_M = 0.07085  # Fysieke markermaat in meters 356
 ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50  # ArUco dictionary voor markerherkenning
 
 ARUCO_MAX_REPROJECTION_ERROR_PX = 3.0  # Maximale toegestane reprojection error voor ArUco-pose in pixels
 ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojection error en sprongen
 
-ARUCO_WORLD_X = 0.069       # World X-positie van markerorigin
-ARUCO_WORLD_Y = 0.238       # World Y-positie van markerorigin
+ARUCO_WORLD_X = 0.0712       # World X-positie van markerorigin
+ARUCO_WORLD_Y = 0.277       # World Y-positie van markerorigin
 ARUCO_WORLD_Z = 0.08      # World Z-positie van markerorigin
 
 CAMERA_MATRIX = np.array([
@@ -130,8 +156,8 @@ DIST_COEFFS = np.array([0.1502961560, -0.9671998692, -0.0037365286, 0.0022325322
 
 ARUCO_TO_ROBOT_ROTATION = np.array(
     [
-        [1.0, 0.0, 0.0],
         [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
         [0.0, 0.0, 1.0],
     ],
     dtype=np.float64

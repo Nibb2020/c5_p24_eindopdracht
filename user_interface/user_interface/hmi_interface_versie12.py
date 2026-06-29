@@ -11,9 +11,12 @@ import rclpy
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.parameter_client import AsyncParameterClient
+from rclpy.executors import SingleThreadedExecutor, ExternalShutdownException
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger, SetBool
 from project_interfaces.msg import ObjectDataArray
+from sensor_msgs.msg import Image as RosImage
+from cv_bridge import CvBridge
 
 
 
@@ -209,12 +212,10 @@ class HumanInterface(Node):
                            bg="black", fg="white", insertbackground="white")
         self.log.pack(fill=tk.BOTH, expand=True)
 
-        # OpenCV Initialisatie
-        self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
+        # ROS image initialisatie
+        self.bridge = CvBridge()
+        self.sub_marked_image = self.create_subscription(RosImage, "/vision/marked_foto", self.marked_image_callback, 10)
 
-        self._video_loop()
         self.toggle_turn_off()
 
     # =====================================================
@@ -891,23 +892,27 @@ class HumanInterface(Node):
 
         self.root.update_idletasks()
 
-    def _video_loop(self):
-        if self.cap.isOpened():
-            ret, frame = self.cap.read()
-            if ret:
-                h, w, _ = frame.shape
-                cv2.circle(frame, (int(w/2), int(h/2)), 4, (0, 255, 0), -1)
-                opencv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
-                captured_image = Image.fromarray(opencv_image)
-                photo_image = ImageTk.PhotoImage(image=captured_image)
-                self.camera_label.photo_image = photo_image
-                self.camera_label.configure(image=photo_image)
+    def marked_image_callback(self, msg: RosImage):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(msg, desired_encoding="bgr8")
+        except Exception as exception:
+            self.get_logger().error(f"Marked image conversie mislukt: {exception}")
+            return
 
-        self.root.after(15, self._video_loop)
+        self.root.after(0, lambda frame=frame: self._update_camera_panel(frame))
+
+
+    def _update_camera_panel(self, frame):
+        frame = cv2.resize(frame, (320, 240))
+        opencv_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGBA)
+        captured_image = Image.fromarray(opencv_image)
+        photo_image = ImageTk.PhotoImage(image=captured_image)
+
+        self.camera_label.photo_image = photo_image
+        self.camera_label.configure(image=photo_image)
 
     def close_hardware(self):
-        if hasattr(self, 'cap') and self.cap.isOpened():
-            self.cap.release()
+        pass
 
 
 # =====================================================
@@ -915,26 +920,72 @@ class HumanInterface(Node):
 # =====================================================
 
 def main(args=None):
-    rclpy.init(args=args)
+    rclpy.init(args=args)  # Initialiseer ROS2
 
-    root = tk.Tk()
-    ui = HumanInterface(root)
+    root = tk.Tk()  # Maak Tkinter root window
+    ui = HumanInterface(root)  # Maak HMI node + GUI
+
+    executor = SingleThreadedExecutor()  # Maak expliciete ROS2 executor
+    executor.add_node(ui)  # Voeg HMI node toe aan executor
+
+    shutdown_requested = threading.Event()  # Houd bij of shutdown al gestart is
+
+    def ros_spin():
+        try:
+            executor.spin()  # Draai ROS2 callbacks in aparte thread
+        except ExternalShutdownException:
+            pass  # Normaal bij afsluiten
+        except Exception as exception:
+            ui.get_logger().error(f"ROS spin-thread gestopt door fout: {exception}")  # Log echte fouten
 
     ros_thread = threading.Thread(
-        target=rclpy.spin,
-        args=(ui,),
-        daemon=True,
+        target=ros_spin,
+        daemon=False,  # Niet daemon, zodat we gecontroleerd kunnen joinen
     )
-    ros_thread.start()
+    ros_thread.start()  # Start ROS2 spin-thread
 
     def close_application():
-        ui.close_hardware()
+        if shutdown_requested.is_set():  # Voorkom dubbele shutdown door meerdere Ctrl+C/window-close events
+            return
 
-        if rclpy.ok():
-            rclpy.shutdown()
+        shutdown_requested.set()  # Markeer shutdown als gestart
 
-        ui.destroy_node()
-        root.destroy()
+        try:
+            ui.close_hardware()  # Sluit eventuele hardware of resources
+        except Exception as exception:
+            ui.get_logger().warning(f"Hardware sluiten mislukt: {exception}")  # Log maar sluit door
+
+        try:
+            executor.remove_node(ui)  # Haal node uit executor voordat node vernietigd wordt
+        except Exception:
+            pass  # Niet kritisch tijdens shutdown
+
+        try:
+            executor.shutdown()  # Stop executor zodat spin-thread netjes eindigt
+        except Exception:
+            pass  # Niet kritisch tijdens shutdown
+
+        try:
+            if rclpy.ok():  # Controleer of ROS2 nog actief is
+                rclpy.shutdown()  # Sluit ROS2 context af
+        except Exception:
+            pass  # Niet kritisch tijdens shutdown
+
+        try:
+            ui.destroy_node()  # Vernietig HMI node
+        except Exception:
+            pass  # Niet kritisch tijdens shutdown
+
+        try:
+            if ros_thread.is_alive():  # Wacht kort tot spin-thread klaar is
+                ros_thread.join(timeout=1.0)
+        except RuntimeError:
+            pass  # Kan gebeuren als join vanuit dezelfde thread zou komen
+
+        try:
+            root.destroy()  # Sluit Tkinter window
+        except tk.TclError:
+            pass  # Window was mogelijk al gesloten
 
     root.protocol(
         "WM_DELETE_WINDOW",
@@ -942,9 +993,11 @@ def main(args=None):
     )
 
     try:
-        root.mainloop()
+        root.mainloop()  # Start Tkinter eventloop
     except KeyboardInterrupt:
-        close_application()
+        close_application()  # Sluit netjes af bij Ctrl+C
+    finally:
+        close_application()  # Zorg dat shutdown altijd één keer geprobeerd wordt
 
 
 if __name__ == "__main__":
