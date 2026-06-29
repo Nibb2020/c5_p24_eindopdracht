@@ -37,7 +37,7 @@ class HumanInterface(Node):
         # Interne MoveGroup parameters (als float tussen 0.05 en 0.50 vanwege de 50% limiet)
         self.snelheid_laatste = 0.10  # Standaard 10%
         self.versnelling_laatste = 0.20  # Standaard 20%
-        self.vision_confidence_laatste = 0.70
+        self.vision_confidence_laatste = 0.85 # Standaard 85%
 
         self.robot_status = "UNKNOWN"
         self.is_countdown_active = False  # Houdt bij of er een timer loopt

@@ -30,7 +30,7 @@ MODELS_DIR = VISION_PACKAGE_DIR / "models"  # Models-map binnen de vision packag
 # Dataset
 # ==================================================
 
-SAVE_DATASET_ON_REQUEST = False  # Sla datasetopname op bij succesvolle objectrequest
+SAVE_DATASET_ON_REQUEST = True  # Sla datasetopname op bij succesvolle objectrequest
 DATASET_FOLDER = DATASET_DIR  # Datasetbasispad binnen de vision package
 
 # ==================================================
@@ -142,9 +142,18 @@ ARUCO_DICTIONARY = cv2.aruco.DICT_4X4_50  # ArUco dictionary voor markerherkenni
 ARUCO_MAX_REPROJECTION_ERROR_PX = 3.0  # Maximale toegestane reprojection error voor ArUco-pose in pixels
 ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojection error en sprongen
 
-ARUCO_WORLD_X = 0.05       # World X-positie van markerorigin
-ARUCO_WORLD_Y = 0.2575       # World Y-positie van markerorigin
-ARUCO_WORLD_Z = 0.18      # World Z-positie van markerorigin
+USE_FIXED_OBJECT_Z = True
+
+ARUCO_WORLD_X = 0.059       # World X-positie van markerorigin
+ARUCO_WORLD_Y = 0.2578       # World Y-positie van markerorigin
+ARUCO_WORLD_Z = 0.12      # World Z-positie van markerorigin
+
+FIXED_OBJECT_Z_M = {
+    0: 0.113,
+    1: 0.102,
+    2: 0.092,
+    3: 0.0835,
+}
 
 CAMERA_MATRIX = np.array([
     [919.80036341, 0.00000000, 321.10036797],

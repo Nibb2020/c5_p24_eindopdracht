@@ -83,7 +83,7 @@ class RobotController(Node):
         self.reset_home_command_sent = False
 
         # Confidence die naar de vision-service wordt gestuurd
-        self.declare_parameter("vision_confidence", 0.7)
+        self.declare_parameter("vision_confidence", 0.85)
 
         # ================= ROS2 CONFIGURATIE =================
         # Publishers naar de gebruikersinterface
@@ -222,7 +222,10 @@ class RobotController(Node):
             return
 
         if not response.success:
-            self.enter_error("Vision found no valid object")
+            self.run_enabled = False
+            self.get_logger().warning("Vision found no valid object")
+            self.set_warning("Vision found no valid object")
+            self.change_state(State.STANDBY)
             return
 
         # TransformStamped bevat zelf opnieuw een veld met de naam transform

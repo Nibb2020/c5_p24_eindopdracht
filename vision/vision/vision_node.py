@@ -825,7 +825,10 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
 
         median_x = float(np.median(x_values))  # Neem mediaan van X voor robuuste positie
         median_y = float(np.median(y_values))  # Neem mediaan van Y voor robuuste positie
-        median_z = float(np.median(z_values))  # Neem mediaan van Z voor robuuste positie
+        if USE_FIXED_OBJECT_Z:
+            median_z = float(measurements[0]["z"])
+        else:
+            median_z = float(np.median(z_values))
         mean_yaw = self.mean_axis_yaw(yaw_values)  # Neem correct hoekgemiddelde van yaw
         mean_confidence = float(np.mean(confidence_values))  # Neem gemiddelde confidence
 
@@ -944,24 +947,27 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)  # Teken optisch zwaartepunt rood
 
             world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_object_axis_yaw)  # Transformeer gripperrichting naar world-yaw
-            world_x, world_y, world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer optisch zwaartepunt naar world-positie
+            world_x, world_y, measured_world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer optisch zwaartepunt naar world-positie
+            world_z = self.get_object_z(int(detection.label), measured_world_z)  # Gebruik vaste object-Z wanneer ingesteld
 
-            obj = {  # Bouw intern objectrecord
-                "object_id": str(uuid.uuid4()),  # Maak uniek object-ID
-                "class": int(detection.label),  # Bewaar klasse-ID
-                "confidence": confidence,  # Bewaar confidence
-                "x": world_x,  # Bewaar world-X
-                "y": world_y,  # Bewaar world-Y
-                "z": world_z,  # Bewaar world-Z
-                "camera_x": camera_x,  # Bewaar camera-X
-                "camera_y": camera_y,  # Bewaar camera-Y
-                "camera_z": camera_z,  # Bewaar camera-Z
-                "yaw": world_yaw,  # World-gripperyaw
-                "image_yaw": image_gripper_yaw,  # Beeldvlak-gripperyaw
-                "image_object_axis_yaw": image_object_axis_yaw,  # Beeldvlak-objectas
-                "axis_ratio": axis_ratio,  # Betrouwbaarheid objectas
-                "bbox": bbox,  # Bewaar boundingbox
-                "robot_pickable": False  # Initialiseer robotfilterstatus
+            obj = {
+                "object_id": str(uuid.uuid4()),
+                "class": int(detection.label),
+                "confidence": confidence,
+                "x": world_x,
+                "y": world_y,
+                "z": world_z,
+                "measured_z": measured_world_z,
+                "fixed_z_used": bool(USE_FIXED_OBJECT_Z),
+                "camera_x": camera_x,
+                "camera_y": camera_y,
+                "camera_z": camera_z,
+                "yaw": world_yaw,
+                "image_yaw": image_gripper_yaw,
+                "image_object_axis_yaw": image_object_axis_yaw,
+                "axis_ratio": axis_ratio,
+                "bbox": bbox,
+                "robot_pickable": False
             }
 
             obj["robot_pickable"] = self.is_robot_pickable(obj)  # Bepaal of object geschikt is voor robot
@@ -1326,6 +1332,18 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             return False  # Weiger object buiten Z-bereik
 
         return True  # Object is geschikt voor robot
+    
+    def get_object_z(self, class_id, measured_z):
+        if not USE_FIXED_OBJECT_Z:
+            return float(measured_z)
+
+        if int(class_id) not in FIXED_OBJECT_Z_M:
+            self.get_logger().warn(
+                f"No fixed Z configured for class_id={class_id}; using measured Z"
+            )
+            return float(measured_z)
+
+        return float(FIXED_OBJECT_Z_M[int(class_id)])
 
     # =====================================================
     # ROS Message Vullen

@@ -54,35 +54,35 @@
         <joint name="joint6" value="0"/>
     </group_state>
     <group_state name="drop1" group="lite6">
-        <joint name="joint1" value="-0.5236"/>
-        <joint name="joint2" value="0.7303"/>
-        <joint name="joint3" value="1.6581"/>
-        <joint name="joint4" value="0.0349"/>
-        <joint name="joint5" value="1.03"/>
-        <joint name="joint6" value="1.06"/>
+        <joint name="joint1" value="-0.5585"/>
+        <joint name="joint2" value="0.6405"/>
+        <joint name="joint3" value="1.773"/>
+        <joint name="joint4" value="-0.003"/>
+        <joint name="joint5" value="1.19222"/>
+        <joint name="joint6" value="1.01"/>
     </group_state>
     <group_state name="drop2" group="lite6">
         <joint name="joint1" value="-0.768"/>
-        <joint name="joint2" value="0.349"/>
-        <joint name="joint3" value="1.047"/>
-        <joint name="joint4" value="0.0347"/>
-        <joint name="joint5" value="0.8203"/>
-        <joint name="joint6" value="0.925"/>
+        <joint name="joint2" value="0.2077"/>
+        <joint name="joint3" value="1.2211"/>
+        <joint name="joint4" value="0.043"/>
+        <joint name="joint5" value="1.086"/>
+        <joint name="joint6" value="0.8129"/>
     </group_state>
     <group_state name="drop3" group="lite6">
-        <joint name="joint1" value="-0.2269"/>
-        <joint name="joint2" value="0.733"/>
-        <joint name="joint3" value="1.2566"/>
-        <joint name="joint4" value="-3.054"/>
-        <joint name="joint5" value="-0.3665"/>
+        <joint name="joint1" value="-0.241"/>
+        <joint name="joint2" value="0.5777"/>
+        <joint name="joint3" value="1.215"/>
+        <joint name="joint4" value="-3.12222"/>
+        <joint name="joint5" value="-0.4765"/>
         <joint name="joint6" value="1.55"/>
     </group_state>
     <group_state name="drop4" group="lite6">
-        <joint name="joint1" value="-0.3316"/>
-        <joint name="joint2" value="0.3491"/>
-        <joint name="joint3" value="0.628"/>
-        <joint name="joint4" value="-2.985"/>
-        <joint name="joint5" value="-0.1047"/>
+        <joint name="joint1" value="-0.3595"/>
+        <joint name="joint2" value="0.192"/>
+        <joint name="joint3" value="0.7453"/>
+        <joint name="joint4" value="-3.077"/>
+        <joint name="joint5" value="-0.494"/>
         <joint name="joint6" value="1.169"/>
     </group_state>
     <!--VIRTUAL JOINT: Purpose: this element defines a virtual joint between a robot link and an external frame of reference (considered fixed with respect to the robot)-->

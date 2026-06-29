@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
+
+import time
+import threading
+
 import rclpy
 from rclpy.node import Node
 from rclpy.executors import MultiThreadedExecutor
-from threading import Thread
 
-from tf2_ros import Buffer, TransformListener, TransformException
+from tf2_ros import Buffer, TransformListener
 
 from my_moveit_python import srdfGroupStates, MovegroupHelper
 import tf_transformations
 
 from project_interfaces.srv import Manipulator
 from std_msgs.msg import String
-import threading
 from xarm_msgs.srv import VacuumGripperCtrl
-import time
 from std_srvs.srv import Trigger
 
 
@@ -86,12 +87,12 @@ class manipulatorController(Node):
 
     def move_to_pose(self, translation, yaw):
         roll = 3.14159      #180 graden
-        pitch = 0#.1396    #8 graden
+        pitch = -0.055    #-x graden
         rotation = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
 
         self.get_logger().info(f"Moving to pose: {translation}, {rotation}")
         self.move_group.move_to_pose(translation, rotation)
-
+    
     def move_to_pose_offset(self, yaw, z_offset=0.1):
         translation_z_offset = [self.translation[0], self.translation[1], self.translation[2] + z_offset]
         self.move_to_pose(translation_z_offset, yaw)
@@ -191,7 +192,7 @@ class manipulatorController(Node):
             self.move_to_state("drop4")
         else:
             self.get_logger().warn("Sorry, er is geen object van een van de vier klasse gedetecteerd")
-            self.move_to_state("home")
+            self.move_to_state("up")
 
         if self.home_is_requested():
             return
@@ -265,7 +266,7 @@ class VacuumGripper(Node):
         self.request.on = False
 
         self.future = self.gripper.call_async(self.request)
-        time.sleep(2.0)
+        time.sleep(3.0)
         return self.future
 
     def open (self):
