@@ -143,9 +143,11 @@ ARUCO_MAX_REPROJECTION_ERROR_PX = 3.0  # Maximale toegestane reprojection error 
 ARUCO_USE_POSE_VALIDATION = True  # True = ArUco-pose controleren op reprojection error en sprongen
 
 USE_FIXED_OBJECT_Z = True
+USE_CLASSICAL_PICK_CENTER = True
+USE_FIXED_PROJECTION_DEPTH = False
 
-ARUCO_WORLD_X = 0.059       # World X-positie van markerorigin
-ARUCO_WORLD_Y = 0.2578       # World Y-positie van markerorigin
+ARUCO_WORLD_X = 0.055       # World X-positie van markerorigin
+ARUCO_WORLD_Y = 0.2522       # World Y-positie van markerorigin
 ARUCO_WORLD_Z = 0.12      # World Z-positie van markerorigin
 
 FIXED_OBJECT_Z_M = {
@@ -153,6 +155,15 @@ FIXED_OBJECT_Z_M = {
     1: 0.102,
     2: 0.092,
     3: 0.0835,
+}
+
+FIXED_PROJECTION_DEPTH_M = 0.720
+
+PICK_CENTER_SHIFT_PX = {
+    0: 0.0,   # schip
+    1: 0.0,   # dino
+    2: 0.0,   # olifant
+    3: 0.0,   # smiley
 }
 
 CAMERA_MATRIX = np.array([
@@ -176,14 +187,14 @@ ARUCO_TO_ROBOT_ROTATION = np.array(
 # Robot Filtering
 # ==================================================
 
-ROBOT_FILTER_ENABLED = False  # Schakel robotfiltering aan of uit
+ROBOT_FILTER_ENABLED = True  # Schakel robotfiltering aan of uit
 ROBOT_ALLOWED_CLASS_IDS = [0, 1, 2, 3,]  # Klasses die robot mag oppakken
 
-ROBOT_MIN_X_M = 0.736   # Minimum world-X voor robotbereik
-ROBOT_MAX_X_M = 0.855    # Maximum world-X voor robotbereik
-ROBOT_MIN_Y_M = 0.2520   # Minimum world-Y voor robotbereik
-ROBOT_MAX_Y_M = 0.4875    # Maximum world-Y voor robotbereik
-ROBOT_MIN_Z_M = 0.0883   # Minimum world-Z voor robotbereik
+ROBOT_MIN_X_M = 0.2261   # Minimum world-X voor robotbereik
+ROBOT_MAX_X_M = 0.3585    # Maximum world-X voor robotbereik
+ROBOT_MIN_Y_M = 0.1007   # Minimum world-Y voor robotbereik
+ROBOT_MAX_Y_M = 0.2470    # Maximum world-Y voor robotbereik
+ROBOT_MIN_Z_M = 0.085   # Minimum world-Z voor robotbereik
 ROBOT_MAX_Z_M = 0.12    # Maximum world-Z voor robotbereik
 
 ROBOT_MIN_CONFIDENCE = 0.85  # Minimum confidence voor robotselectie

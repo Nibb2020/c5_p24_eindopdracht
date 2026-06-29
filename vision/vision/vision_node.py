@@ -631,101 +631,173 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
     # Classical Object Pose From ROI
     # =====================================================
 
-    def estimate_object_axis_from_classical_roi(self, frame, bbox):
-        x_min, y_min, x_max, y_max = bbox  # Lees YOLO-boundingbox uit
-        image_height, image_width = frame.shape[:2]  # Lees beeldformaat
+    def estimate_object_axis_from_classical_roi(self, frame, bbox, class_id):
+        x_min, y_min, x_max, y_max = bbox
+        image_height, image_width = frame.shape[:2]
 
-        x_min = max(0, min(x_min, image_width - 1))  # Clamp bbox-links
-        x_max = max(0, min(x_max, image_width - 1))  # Clamp bbox-rechts
-        y_min = max(0, min(y_min, image_height - 1))  # Clamp bbox-boven
-        y_max = max(0, min(y_max, image_height - 1))  # Clamp bbox-onder
+        x_min = max(0, min(x_min, image_width - 1))
+        x_max = max(0, min(x_max, image_width - 1))
+        y_min = max(0, min(y_min, image_height - 1))
+        y_max = max(0, min(y_max, image_height - 1))
 
-        if x_max <= x_min or y_max <= y_min:  # Controleer geldige bbox
-            return None  # Stop bij ongeldige bbox
+        if x_max <= x_min or y_max <= y_min:
+            return None
 
-        bbox_width = x_max - x_min  # Bereken bbox-breedte
-        bbox_height = y_max - y_min  # Bereken bbox-hoogte
-        margin_x = int(bbox_width * 0.25)  # Maak cropmarge in X
-        margin_y = int(bbox_height * 0.25)  # Maak cropmarge in Y
+        bbox_width = x_max - x_min
+        bbox_height = y_max - y_min
+        margin_x = int(bbox_width * 0.25)
+        margin_y = int(bbox_height * 0.25)
 
-        crop_x_min = max(0, x_min - margin_x)  # Bepaal crop-links
-        crop_x_max = min(image_width, x_max + margin_x)  # Bepaal crop-rechts
-        crop_y_min = max(0, y_min - margin_y)  # Bepaal crop-boven
-        crop_y_max = min(image_height, y_max + margin_y)  # Bepaal crop-onder
+        crop_x_min = max(0, x_min - margin_x)
+        crop_x_max = min(image_width, x_max + margin_x)
+        crop_y_min = max(0, y_min - margin_y)
+        crop_y_max = min(image_height, y_max + margin_y)
 
-        crop = frame[crop_y_min:crop_y_max, crop_x_min:crop_x_max].copy()  # Pak RGB-crop
-        crop_height, crop_width = crop.shape[:2]  # Lees cropformaat
+        crop = frame[crop_y_min:crop_y_max, crop_x_min:crop_x_max].copy()
+        crop_height, crop_width = crop.shape[:2]
 
-        if crop_width < 10 or crop_height < 10:  # Controleer minimale cropgrootte
-            return None  # Stop bij te kleine crop
+        if crop_width < 10 or crop_height < 10:
+            return None
 
-        grabcut_mask = np.zeros((crop_height, crop_width), dtype=np.uint8)  # Maak GrabCut-masker
-        bgd_model = np.zeros((1, 65), dtype=np.float64)  # Maak achtergrondmodel
-        fgd_model = np.zeros((1, 65), dtype=np.float64)  # Maak voorgrondmodel
+        grabcut_mask = np.zeros((crop_height, crop_width), dtype=np.uint8)
+        bgd_model = np.zeros((1, 65), dtype=np.float64)
+        fgd_model = np.zeros((1, 65), dtype=np.float64)
 
-        rect_x = max(1, x_min - crop_x_min)  # Bbox-links relatief in crop
-        rect_y = max(1, y_min - crop_y_min)  # Bbox-boven relatief in crop
-        rect_w = max(2, min(x_max - x_min, crop_width - rect_x - 1))  # Bbox-breedte relatief in crop
-        rect_h = max(2, min(y_max - y_min, crop_height - rect_y - 1))  # Bbox-hoogte relatief in crop
-        grabcut_rect = (rect_x, rect_y, rect_w, rect_h)  # Maak GrabCut-rectangle
+        rect_x = max(1, x_min - crop_x_min)
+        rect_y = max(1, y_min - crop_y_min)
+        rect_w = max(2, min(x_max - x_min, crop_width - rect_x - 1))
+        rect_h = max(2, min(y_max - y_min, crop_height - rect_y - 1))
+        grabcut_rect = (rect_x, rect_y, rect_w, rect_h)
 
         try:
-            cv2.grabCut(crop, grabcut_mask, grabcut_rect, bgd_model, fgd_model, 3, cv2.GC_INIT_WITH_RECT)  # Segmenteer object
+            cv2.grabCut(
+                crop,
+                grabcut_mask,
+                grabcut_rect,
+                bgd_model,
+                fgd_model,
+                3,
+                cv2.GC_INIT_WITH_RECT,
+            )
         except Exception as ex:
-            self.get_logger().warn(f"GrabCut failed: {ex}")  # Log fout
-            return None  # Stop bij fout
+            self.get_logger().warn(f"GrabCut failed: {ex}")
+            return None
 
-        foreground_mask = (  # Maak binair voorgrondmasker
+        foreground_mask = (
             (grabcut_mask == cv2.GC_FGD) |
             (grabcut_mask == cv2.GC_PR_FGD)
-        ).astype(np.uint8)  # Zet om naar uint8
+        ).astype(np.uint8)
 
-        kernel = np.ones((3, 3), np.uint8)  # Maak morphology-kernel
-        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, kernel)  # Verwijder ruis
-        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, kernel)  # Vul kleine gaten
+        kernel = np.ones((3, 3), np.uint8)
+        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, kernel)
+        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_CLOSE, kernel)
 
-        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(foreground_mask, connectivity=8)  # Zoek componenten
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(
+            foreground_mask,
+            connectivity=8,
+        )
 
-        if num_labels <= 1:  # Controleer of objectcomponent bestaat
-            return None  # Stop zonder objectcomponent
+        if num_labels <= 1:
+            return None
 
-        largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))  # Kies grootste component
-        object_mask = (labels == largest_label).astype(np.uint8)  # Maak objectmasker
-        ys, xs = np.where(object_mask > 0)  # Zoek objectpixels
+        largest_label = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+        object_mask = (labels == largest_label).astype(np.uint8)
 
-        if xs.size < MIN_VALID_DEPTH_PIXELS:  # Controleer genoeg objectpixels
-            return None  # Stop bij te weinig pixels
+        ys, xs = np.where(object_mask > 0)
 
-        global_xs = xs + crop_x_min  # Zet crop-X om naar beeld-X
-        global_ys = ys + crop_y_min  # Zet crop-Y om naar beeld-Y
+        if xs.size < MIN_VALID_DEPTH_PIXELS:
+            return None
 
-        points = np.column_stack((global_xs.astype(np.float32), global_ys.astype(np.float32)))  # Bouw puntenwolk van objectpixels
-        mean = np.mean(points, axis=0)  # Bereken gemiddelde punt
-        centered_points = points - mean  # Centreer puntenwolk
+        global_xs = xs + crop_x_min
+        global_ys = ys + crop_y_min
 
-        covariance = np.cov(centered_points, rowvar=False)  # Bereken covariantie
-        eigenvalues, eigenvectors = np.linalg.eig(covariance)  # Bereken PCA
+        points = np.column_stack(
+            (
+                global_xs.astype(np.float32),
+                global_ys.astype(np.float32),
+            )
+        )
 
-        sorted_indices = np.argsort(eigenvalues)[::-1]  # Sorteer eigenwaarden aflopend
-        major_index = int(sorted_indices[0])  # Index langste as
-        minor_index = int(sorted_indices[1])  # Index kortste as
+        optical_center = np.mean(points, axis=0)
+        centered_points = points - optical_center
 
-        principal_axis = eigenvectors[:, major_index]  # Pak langste objectas
+        covariance = np.cov(centered_points, rowvar=False)
+        eigenvalues, eigenvectors = np.linalg.eig(covariance)
 
-        if float(principal_axis[0]) < 0.0:  # Houd richting consistent
-            principal_axis = -principal_axis  # Draai as om
+        sorted_indices = np.argsort(eigenvalues)[::-1]
+        major_index = int(sorted_indices[0])
+        minor_index = int(sorted_indices[1])
 
-        raw_object_axis_yaw = math.atan2(float(principal_axis[1]), float(principal_axis[0]))  # Bereken ruwe objectas
-        raw_gripper_yaw = raw_object_axis_yaw + math.pi / 2.0  # Bereken ruwe gripperas exact haaks
+        principal_axis = eigenvectors[:, major_index].astype(np.float64)
+        minor_axis = eigenvectors[:, minor_index].astype(np.float64)
 
-        object_axis_yaw = self.normalize_axis_yaw(raw_object_axis_yaw)  # Normaliseer objectas voor opslag
-        gripper_yaw = self.normalize_axis_yaw(raw_gripper_yaw)  # Normaliseer gripperas voor opslag
+        principal_axis = principal_axis / max(np.linalg.norm(principal_axis), 1e-9)
+        minor_axis = minor_axis / max(np.linalg.norm(minor_axis), 1e-9)
 
-        eigenvalue_major = float(eigenvalues[major_index])  # Lees hoofdvariantie
-        eigenvalue_minor = float(eigenvalues[minor_index])  # Lees minorvariantie
-        axis_ratio = eigenvalue_major / max(eigenvalue_minor, 1e-6)  # Bereken asbetrouwbaarheid
+        if float(principal_axis[0]) < 0.0:
+            principal_axis = -principal_axis
 
-        return (gripper_yaw, object_axis_yaw, axis_ratio)  # Geef alleen rotatie-info terug
+        major_projection = centered_points @ principal_axis
+        minor_projection = np.abs(centered_points @ minor_axis)
+
+        positive_mask = major_projection >= 0.0
+        negative_mask = major_projection < 0.0
+
+        if np.count_nonzero(positive_mask) > 0:
+            positive_score = float(np.mean(minor_projection[positive_mask])) * float(np.count_nonzero(positive_mask))
+        else:
+            positive_score = 0.0
+
+        if np.count_nonzero(negative_mask) > 0:
+            negative_score = float(np.mean(minor_projection[negative_mask])) * float(np.count_nonzero(negative_mask))
+        else:
+            negative_score = 0.0
+
+        if negative_score > positive_score:
+            positive_shape_axis = -principal_axis
+        else:
+            positive_shape_axis = principal_axis
+
+        shift_px = self.get_pick_center_shift_px(class_id)
+
+        shifted_center = optical_center + positive_shape_axis * shift_px
+
+        shifted_center_x = int(max(0, min(image_width - 1, shifted_center[0])))
+        shifted_center_y = int(max(0, min(image_height - 1, shifted_center[1])))
+
+        optical_center_x = int(max(0, min(image_width - 1, optical_center[0])))
+        optical_center_y = int(max(0, min(image_height - 1, optical_center[1])))
+
+        raw_object_axis_yaw = math.atan2(
+            float(principal_axis[1]),
+            float(principal_axis[0]),
+        )
+
+        positive_object_axis_yaw = math.atan2(
+            float(positive_shape_axis[1]),
+            float(positive_shape_axis[0]),
+        )
+
+        raw_gripper_yaw = raw_object_axis_yaw + math.pi / 2.0
+
+        object_axis_yaw = self.normalize_axis_yaw(raw_object_axis_yaw)
+        positive_axis_yaw = self.normalize_angle_pi(positive_object_axis_yaw)
+        gripper_yaw = self.normalize_axis_yaw(raw_gripper_yaw)
+
+        eigenvalue_major = float(eigenvalues[major_index])
+        eigenvalue_minor = float(eigenvalues[minor_index])
+        axis_ratio = eigenvalue_major / max(eigenvalue_minor, 1e-6)
+
+        return (
+            gripper_yaw,
+            object_axis_yaw,
+            positive_axis_yaw,
+            axis_ratio,
+            optical_center_x,
+            optical_center_y,
+            shifted_center_x,
+            shifted_center_y,
+        )
 
     # =====================================================
     # Image Yaw To World Yaw
@@ -927,32 +999,64 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             x_max = int(detection.xmax * frame.shape[1])  # Bereken bbox rechts
             y_min = int(detection.ymin * frame.shape[0])  # Bereken bbox boven
             y_max = int(detection.ymax * frame.shape[0])  # Bereken bbox onder
-            bbox = (x_min, y_min, x_max, y_max)  # Bouw bbox tuple
-            position_result = self.estimate_position_from_depth_roi(depth_frame, bbox)  # Gebruik oude betere positiebepaling
+            bbox = (x_min, y_min, x_max, y_max)
+            class_id = int(detection.label)
 
-            if position_result is None:  # Controleer of positie geldig is
-                continue  # Sla object zonder geldige positie over
+            axis_result = self.estimate_object_axis_from_classical_roi(frame, bbox, class_id,)
 
-            camera_x, camera_y, camera_z, z_mm, center_x, center_y = position_result  # Pak oude positie uit
-
-            axis_result = self.estimate_object_axis_from_classical_roi(frame, bbox)  # Gebruik klassieke vision alleen voor objectas
-
-            if axis_result is None:  # Controleer of rotatie geldig is
-                image_gripper_yaw = 0.0  # Gebruik fallback-gripperhoek
-                image_object_axis_yaw = 0.0  # Gebruik fallback-objectas
-                axis_ratio = 0.0  # Markeer lage betrouwbaarheid
+            if axis_result is None:
+                image_gripper_yaw = 0.0
+                image_object_axis_yaw = 0.0
+                image_positive_axis_yaw = 0.0
+                axis_ratio = 0.0
+                center_x = int((x_min + x_max) / 2)
+                center_y = int((y_min + y_max) / 2)
+                optical_center_x = center_x
+                optical_center_y = center_y
             else:
-                image_gripper_yaw, image_object_axis_yaw, axis_ratio = axis_result  # Pak rotatie uit
+                (
+                    image_gripper_yaw,
+                    image_object_axis_yaw,
+                    image_positive_axis_yaw,
+                    axis_ratio,
+                    optical_center_x,
+                    optical_center_y,
+                    center_x,
+                    center_y,
+                ) = axis_result
 
-            cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)  # Teken optisch zwaartepunt rood
+            if USE_FIXED_PROJECTION_DEPTH:
+                camera_z = float(FIXED_PROJECTION_DEPTH_M)
+            else:
+                position_result = self.estimate_position_from_depth_roi(
+                    depth_frame,
+                    bbox,
+                )
+
+                if position_result is None:
+                    continue
+
+                _, _, camera_z, _, _, _ = position_result
+
+            camera_x, camera_y, camera_z = self.image_point_to_camera_point(
+                center_x,
+                center_y,
+                camera_z,
+            )
+
+            z_mm = camera_z * 1000.0
+
+            cv2.circle(frame, (optical_center_x, optical_center_y), 5, (255, 0, 255), -1)
+            cv2.circle(frame, (center_x, center_y), 5, (0, 0, 255), -1)
+            cv2.line(frame, (optical_center_x, optical_center_y), (center_x, center_y), (0, 0, 255), 2)
 
             world_yaw = self.image_yaw_to_world_yaw(center_x, center_y, camera_z, image_object_axis_yaw)  # Transformeer gripperrichting naar world-yaw
             world_x, world_y, measured_world_z = self.transform_to_world(camera_x, camera_y, camera_z)  # Transformeer optisch zwaartepunt naar world-positie
-            world_z = self.get_object_z(int(detection.label), measured_world_z)  # Gebruik vaste object-Z wanneer ingesteld
+            world_z = self.get_object_z(class_id, measured_world_z)  # Gebruik vaste object-Z wanneer ingesteld
 
             obj = {
                 "object_id": str(uuid.uuid4()),
-                "class": int(detection.label),
+                "class": class_id,
                 "confidence": confidence,
                 "x": world_x,
                 "y": world_y,
@@ -965,9 +1069,14 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
                 "yaw": world_yaw,
                 "image_yaw": image_gripper_yaw,
                 "image_object_axis_yaw": image_object_axis_yaw,
+                "image_positive_axis_yaw": image_positive_axis_yaw,
                 "axis_ratio": axis_ratio,
                 "bbox": bbox,
-                "robot_pickable": False
+                "optical_center_x": optical_center_x,
+                "optical_center_y": optical_center_y,
+                "pick_center_x": center_x,
+                "pick_center_y": center_y,
+                "robot_pickable": False,
             }
 
             obj["robot_pickable"] = self.is_robot_pickable(obj)  # Bepaal of object geschikt is voor robot
@@ -983,6 +1092,7 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             cv2.putText(frame, f"{class_name} {confidence:.2f}", (x_min, y_min - 5), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1)  # Teken label
             self.draw_yaw_axis(frame, center_x, center_y, bbox, image_gripper_yaw, (0, 255, 255))  # Geel = gripperas haaks op objectas
             self.draw_yaw_axis(frame, center_x, center_y, bbox, image_object_axis_yaw, (255, 0, 0))  # Blauw = echte langste objectas
+            self.draw_yaw_axis(frame, center_x, center_y, bbox, image_positive_axis_yaw, (0, 0, 255))
 
         return (object_list, best_object, dataset_frame, frame)  # Geef objecten, beste object, datasetframe en gemarkeerd frame terug
 
@@ -1344,6 +1454,25 @@ class VisionNode(Node):  # Hoofdnode voor vision, camera, detectie en service-af
             return float(measured_z)
 
         return float(FIXED_OBJECT_Z_M[int(class_id)])
+    
+    def get_pick_center_shift_px(self, class_id):
+        if int(class_id) not in PICK_CENTER_SHIFT_PX:
+            return 0.0
+
+        return float(PICK_CENTER_SHIFT_PX[int(class_id)])
+    
+
+    def image_point_to_camera_point(self, center_x, center_y, projection_depth_m):
+        fx = float(self.camera_matrix[0, 0])
+        fy = float(self.camera_matrix[1, 1])
+        cx_camera = float(self.camera_matrix[0, 2])
+        cy_camera = float(self.camera_matrix[1, 2])
+
+        camera_x = ((float(center_x) - cx_camera) * float(projection_depth_m) / fx)
+        camera_y = ((float(center_y) - cy_camera) * float(projection_depth_m) / fy)
+        camera_z = float(projection_depth_m)
+
+        return camera_x, camera_y, camera_z
 
     # =====================================================
     # ROS Message Vullen
