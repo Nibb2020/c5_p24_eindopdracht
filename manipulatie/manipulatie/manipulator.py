@@ -79,23 +79,50 @@ class manipulatorController(Node):
     # --- Motion primitives ------------------------------------------------
     def move_to_state(self, state_name: str):
         result, joint_values = self.group_states.get_joint_values(state_name)
+
         if not result:
             self.get_logger().error(f"Failed to get joint values for state '{state_name}'.")
-            return
+            return False
+
         self.get_logger().info(f"Moving to state '{state_name}'.")
-        self.move_group.move_to_configuration(joint_values)
+
+        motion_success = self.move_group.move_to_configuration(joint_values)
+
+        if not motion_success:
+            self.get_logger().warn(f"Motion to state '{state_name}' failed.")
+            return False
+
+        return True
 
     def move_to_pose(self, translation, yaw):
-        roll = 3.14159      #180 graden
-        pitch = -0.055    #-x graden
-        rotation = tf_transformations.quaternion_from_euler(roll, pitch, yaw)
+        roll = 3.14159
+        pitch = -0.055
+        rotation = tf_transformations.quaternion_from_euler(roll, pitch, yaw,)
 
         self.get_logger().info(f"Moving to pose: {translation}, {rotation}")
-        self.move_group.move_to_pose(translation, rotation)
+
+        motion_success = self.move_group.move_to_pose(
+            translation,
+            rotation,
+        )
+
+        if not motion_success:
+            self.get_logger().warn(f"Motion to pose failed: {translation}")
+            return False
+
+        return True
     
     def move_to_pose_offset(self, yaw, z_offset=0.1):
-        translation_z_offset = [self.translation[0], self.translation[1], self.translation[2] + z_offset]
-        self.move_to_pose(translation_z_offset, yaw)
+        translation_z_offset = [
+            self.translation[0],
+            self.translation[1],
+            self.translation[2] + z_offset,
+        ]
+
+        return self.move_to_pose(
+            translation_z_offset,
+            yaw,
+        )
 
     # --- App sequence ----------------------------------------------------
 
@@ -132,16 +159,23 @@ class manipulatorController(Node):
 
             self.publish_status("Robot beweging gestart")
 
-            self.execute_app()
+            success = self.execute_app()
 
             if self.home_is_requested():
                 self.publish_status("Sequence onderbroken, robot gaat naar up positie")
 
-                self.move_to_home()
+                home_success = self.move_to_home()
 
-                self.publish_status("Home_klaar")
-            else:
+                if home_success:
+                    self.publish_status("Home_klaar")
+                else:
+                    self.publish_status("Fout: home-beweging mislukt")
+
+            elif success:
                 self.publish_status("Klaar")
+
+            else:
+                self.publish_status("Fout: manipulator sequence mislukt")
 
         except Exception as exception:
             self.publish_status(
@@ -162,47 +196,58 @@ class manipulatorController(Node):
 
     #echte logica
     def execute_app(self):
-        self.move_to_pose_offset(   self.yaw_rotation)
-        if self.home_is_requested():
-            return
+        if not self.move_to_pose_offset(self.yaw_rotation):
+            return False
 
-        self.move_to_pose(self.translation, self.yaw_rotation)
         if self.home_is_requested():
-            return
+            return False
+
+        if not self.move_to_pose(self.translation, self.yaw_rotation):
+            return False
+
+        if self.home_is_requested():
+            return False
 
         self.vacuum_gripper.close()
 
         if self.home_is_requested():
-            return
-        
-        self.move_to_pose_offset(   self.yaw_rotation)
+            return False
+
+        if not self.move_to_pose_offset(self.yaw_rotation):
+            self.vacuum_gripper.open()
+            return False
+
         if self.home_is_requested():
-            return
-        
-        if self.home_is_requested():
-            return
+            return False
 
         if self.klasse == "schip":
-            self.move_to_state("drop1")
+            drop_success = self.move_to_state("drop1")
         elif self.klasse == "dino":
-            self.move_to_state("drop2")
+            drop_success = self.move_to_state("drop2")
         elif self.klasse == "olifant":
-            self.move_to_state("drop3")
+            drop_success = self.move_to_state("drop3")
         elif self.klasse == "smiley":
-            self.move_to_state("drop4")
+            drop_success = self.move_to_state("drop4")
         else:
             self.get_logger().warn("Sorry, er is geen object van een van de vier klasse gedetecteerd")
-            self.move_to_state("up")
+            drop_success = self.move_to_state("up")
+
+        if not drop_success:
+            self.vacuum_gripper.open()
+            return False
 
         if self.home_is_requested():
-            return
+            return False
 
         self.vacuum_gripper.open()
 
         if self.home_is_requested():
-            return
+            return False
 
-        self.move_to_state("up")
+        if not self.move_to_state("up"):
+            return False
+
+        return True
 
     
 
@@ -231,8 +276,13 @@ class manipulatorController(Node):
     def _run_home_process(self):
         try:
             self.publish_status("Robot gaat naar up positie")
-            self.move_to_home()
-            self.publish_status("Home_klaar")
+
+            home_success = self.move_to_home()
+
+            if home_success:
+                self.publish_status("Home_klaar")
+            else:
+                self.publish_status("Fout tijdens move_home")
 
         except Exception as e:
             self.publish_status(f"Fout tijdens move_home: {str(e)}")
@@ -250,7 +300,7 @@ class manipulatorController(Node):
     def move_to_home(self):
         self.vacuum_gripper.open()
 
-        self.move_to_state("up")
+        return self.move_to_state("up")
 
 #vacuum gripper node
 class VacuumGripper(Node):
@@ -286,7 +336,6 @@ def main(args=None):
     rclpy.init(args=args)
 
     # Instantiate the manipulatorController node.
-    # NOTE: This must be done before creating the executor to ensure callbacks are registered correctly.
     node = manipulatorController("manipulatie")
 
     # Create a multithreaded executor with 2 threads.

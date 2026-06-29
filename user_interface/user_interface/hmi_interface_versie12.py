@@ -56,8 +56,19 @@ class HumanInterface(Node):
 
         # Previous ObjectDataArray converted to class and position.
         self.vorige_vision_objecten = None
+        self.pending_sort_object_class = None
+        self.pending_sort_object_id = None
+        self.pending_sort_active = False
+        self.pending_sort_already_counted = False
 
-        # Maximum XY movement for considering two detections the same object.
+        # Teller telt niet meer op verdwenen vision-objecten.
+        # De teller telt pas wanneer de manipulator "Klaar" meldt.
+        self.pending_sort_object_class = None
+        self.pending_sort_object_id = None
+        self.pending_sort_active = False
+        self.pending_sort_already_counted = False
+
+        # Oude disappearance-matching blijft ongebruikt.
         self.object_match_afstand = 0.01
 
         # ================= ROS2 CONFIGURATIE =================
@@ -69,6 +80,7 @@ class HumanInterface(Node):
         self.sub_robot_warning = self.create_subscription(String,"/controller/warning",self.robot_warning_callback,10)
         self.sub_robot_error = self.create_subscription(String,"/controller/error",self.robot_error_callback,10)
         self.sub_vision_data = self.create_subscription(ObjectDataArray,"/vision/object_data_ui",self.vision_data_callback,10)
+        self.sub_manipulator_status = self.create_subscription(String,"/manipulator/status",self.manipulator_status_callback,10)
 
         #clients
         self.cli_reset = self.create_client(Trigger,"/ui/reset_error")
@@ -287,6 +299,36 @@ class HumanInterface(Node):
 
         return snapshot
     
+    def _selecteer_teller_object_uit_vision_msg(self, msg: ObjectDataArray):
+        geldige_objecten = []
+
+        for obj in msg.objects:
+            object_class = obj.object_class.strip().casefold()
+
+            if object_class not in self.gesorteerde_tellers:
+                self.get_logger().warning(
+                    f"Onbekende vision-klasse ontvangen: '{obj.object_class}'"
+                )
+                continue
+
+            geldige_objecten.append(obj)
+
+        if not geldige_objecten:
+            return None
+
+        beste_object = max(
+            geldige_objecten,
+            key=lambda obj: float(obj.confidence)
+        )
+
+        object_class = beste_object.object_class.strip().casefold()
+
+        return {
+            "class": object_class,
+            "object_id": beste_object.object_id,
+            "confidence": float(beste_object.confidence),
+        }
+
     def _bereken_xy_afstand(self, object_a, object_b):
         verschil_x = object_a["x"] - object_b["x"]
         verschil_y = object_a["y"] - object_b["y"]
@@ -346,71 +388,102 @@ class HumanInterface(Node):
         return verdwenen_objecten, nieuwe_objecten
 
     def vision_data_callback(self, msg: ObjectDataArray):
-        huidige_objecten = self._maak_vision_snapshot(msg)
+        teller_object = self._selecteer_teller_object_uit_vision_msg(msg)
 
-        # The first message only establishes the baseline.
-        if self.vorige_vision_objecten is None:
-            self.vorige_vision_objecten = huidige_objecten
-
-            self.root.after(0,lambda aantal=len(huidige_objecten):self.update_ui_log(f"[TELLER] Beginmeting opgeslagen met {aantal} objecten."))
+        if teller_object is None:
+            self.root.after(
+                0,
+                lambda: self.update_ui_log("[TELLER] Visionbericht zonder geldig tellerobject ontvangen.")
+            )
             return
 
-        verdwenen_objecten, nieuwe_objecten = (
-            self._zoek_verdwenen_objecten(
-                self.vorige_vision_objecten,
-                huidige_objecten
-            )
+        object_class = teller_object["class"]
+        object_id = teller_object["object_id"]
+        confidence = teller_object["confidence"]
+
+        self.pending_sort_object_class = object_class
+        self.pending_sort_object_id = object_id
+        self.pending_sort_active = True
+        self.pending_sort_already_counted = False
+
+        self.root.after(
+            0,
+            lambda klasse=object_class, conf=confidence:
+                self.update_ui_log(
+                    f"[TELLER] Sorteerobject opgeslagen: {klasse.upper()} "
+                    f"(confidence={conf:.2f}). Wachten op manipulator 'Klaar'."
+                )
         )
 
-        verdwenen_per_klasse = {}
+    def manipulator_status_callback(self, msg: String):
+        status = msg.data.strip()
+        status_normalized = status.casefold()
 
-        for verdwenen_object in verdwenen_objecten:
-            object_class = verdwenen_object["class"]
+        if status_normalized == "klaar":
+            self._verwerk_succesvolle_sortering()
+            return
 
-            verdwenen_per_klasse[object_class] = (
-                verdwenen_per_klasse.get(object_class, 0) + 1
-            )
+        if status_normalized.startswith("fout"):
+            self._verwerk_mislukte_sortering(status)
+            return
 
-        for object_class, aantal_verdwenen in verdwenen_per_klasse.items():
-            self.gesorteerde_tellers[object_class] += aantal_verdwenen
-            nieuw_totaal = self.gesorteerde_tellers[object_class]
+        if "mislukt" in status_normalized:
+            self._verwerk_mislukte_sortering(status)
+            return
 
-            self.root.after(
-                0,
-                lambda klasse=object_class,
-                    verschil=aantal_verdwenen,
-                    totaal=nieuw_totaal:
-                    self._verwerk_vision_telling(
-                        klasse,
-                        verschil,
-                        totaal
-                    )
-            )
+    def _verwerk_succesvolle_sortering(self):
+        if not self.pending_sort_active:
+            return
 
-        if nieuwe_objecten:
-            nieuwe_per_klasse = {}
+        if self.pending_sort_already_counted:
+            return
 
-            for nieuw_object in nieuwe_objecten:
-                object_class = nieuw_object["class"]
+        object_class = self.pending_sort_object_class
 
-                nieuwe_per_klasse[object_class] = (
-                    nieuwe_per_klasse.get(object_class, 0) + 1
+        if object_class not in self.gesorteerde_tellers:
+            self.pending_sort_active = False
+            self.pending_sort_object_class = None
+            self.pending_sort_object_id = None
+            self.pending_sort_already_counted = False
+            return
+
+        self.gesorteerde_tellers[object_class] += 1
+        nieuw_totaal = self.gesorteerde_tellers[object_class]
+
+        self.pending_sort_already_counted = True
+        self.pending_sort_active = False
+        self.pending_sort_object_class = None
+        self.pending_sort_object_id = None
+
+        self.root.after(
+            0,
+            lambda klasse=object_class, totaal=nieuw_totaal:
+                self._verwerk_vision_telling(
+                    klasse,
+                    1,
+                    totaal
                 )
+        )
 
-            beschrijving = ", ".join(
-                f"{object_class}: {aantal}"
-                for object_class, aantal in nieuwe_per_klasse.items()
-            )
 
-            self.root.after(
-                0,
-                lambda tekst=beschrijving:
-                    self.update_ui_log(
-                        f"[TELLER] Nieuwe objecten gezien: {tekst}"
-                    )
-            )
+    def _verwerk_mislukte_sortering(self, status):
+        if not self.pending_sort_active:
+            return
 
-        self.vorige_vision_objecten = huidige_objecten
+        object_class = self.pending_sort_object_class
+
+        self.pending_sort_active = False
+        self.pending_sort_object_class = None
+        self.pending_sort_object_id = None
+        self.pending_sort_already_counted = False
+
+        self.root.after(
+            0,
+            lambda klasse=object_class, tekst=status:
+                self.update_ui_log(
+                    f"[TELLER] {klasse.upper()} niet geteld, manipulator meldde: {tekst}"
+                )
+        )
 
     # =====================================================
     # UITGAANDE COMMUNICATIE (Publishers & Services)
@@ -830,10 +903,10 @@ class HumanInterface(Node):
 
         self.update_ui_log("[HMI] Reset voltooid. Controller staat stand-by. Tellers zijn gewist.")
 
-    def _verwerk_vision_telling(self,object_class,aantal_verdwenen,totaal):
+    def _verwerk_vision_telling(self,object_class,aantal_gesorteerd,totaal):
         self.update_ui_log(
-            f"[TELLER] {aantal_verdwenen}x "
-            f"{object_class.upper()} verdwenen. "
+            f"[TELLER] {aantal_gesorteerd}x "
+            f"{object_class.upper()} succesvol gesorteerd. "
             f"Gesorteerd totaal: {totaal}"
         )
 

@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 
+import time
+
 import rclpy
 from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 
+from action_msgs.msg import GoalStatus
 from pymoveit2 import MoveIt2, MoveIt2Servo
 from ament_index_python.packages import get_package_share_directory
 import xml.etree.ElementTree as ET
@@ -91,6 +94,8 @@ class MovegroupHelper(Node):
         #parameters zelf toegevoegd:
         self.node.declare_parameter("velocity_scaling", 0.1)
         self.node.declare_parameter("acceleration_scaling", 0.1)
+        self.node.declare_parameter("max_planning_attempts", 10)
+        self.node.declare_parameter("planning_retry_delay_sec", 0.2)
 
     def wait_for_moveit_services(self, timeout_sec=10.0):
         """Wait for MoveIt2 services to become available."""
@@ -123,87 +128,175 @@ class MovegroupHelper(Node):
         self.get_logger().info("All MoveIt2 services are ready!")
         return True
 
+    def get_max_planning_attempts(self):
+        max_attempts = self.node.get_parameter("max_planning_attempts").value
+        max_attempts = int(max_attempts)
+        max_attempts = max(1, min(max_attempts, 10))
+        return max_attempts
+
+    def get_planning_retry_delay_sec(self):
+        retry_delay = self.node.get_parameter("planning_retry_delay_sec").value
+        retry_delay = float(retry_delay)
+        retry_delay = max(0.0, min(retry_delay, 2.0))
+        return retry_delay
+
+    def get_current_execution_future(self):
+        try:
+            return self.moveit2.get_execution_future()
+        except Exception:
+            return None
+
+    def execution_result_is_successful(self, future):
+        if future is None:
+            return False
+
+        if not future.done():
+            return False
+
+        try:
+            result = future.result()
+        except Exception as exception:
+            self.get_logger().warn(f"Failed to read execution result: {exception}")
+            return False
+
+        status = getattr(result, "status", None)
+
+        if status is not None:
+            if int(status) == GoalStatus.STATUS_SUCCEEDED:
+                return True
+
+            self.get_logger().warn(f"Action 'execute_trajectory' was unsuccessful: {status}.")
+            return False
+
+        result_object = getattr(result, "result", None)
+
+        if result_object is None:
+            return False
+
+        error_code = getattr(result_object, "error_code", None)
+
+        if error_code is None:
+            return False
+
+        error_value = getattr(error_code, "val", error_code)
+
+        try:
+            error_value = int(error_value)
+        except Exception:
+            return False
+
+        if error_value == 1:
+            return True
+
+        self.get_logger().warn(f"MoveIt execution failed with error code: {error_value}")
+        return False
+
+    def execute_motion_once(self, motion_function):
+        previous_future = self.get_current_execution_future()
+
+        try:
+            motion_function()
+        except Exception as exception:
+            self.get_logger().warn(f"MoveIt motion request failed: {exception}")
+            return False, True
+
+        try:
+            wait_result = self.moveit2.wait_until_executed()
+        except Exception as exception:
+            self.get_logger().warn(f"MoveIt wait failed: {exception}")
+            return False, False
+
+        if isinstance(wait_result, bool):
+            return wait_result, not wait_result
+
+        current_future = self.get_current_execution_future()
+
+        if current_future is None:
+            self.get_logger().warn("MoveIt did not create an execution future. Assuming planning failed.")
+            return False, True
+
+        if previous_future is not None and current_future is previous_future:
+            self.get_logger().warn("MoveIt did not create a new execution future. Assuming planning failed.")
+            return False, True
+
+        success = self.execution_result_is_successful(current_future)
+
+        if success:
+            return True, False
+
+        return False, False
+
+    def execute_with_planning_retries(self, description, motion_function):
+        max_attempts = self.get_max_planning_attempts()
+        retry_delay = self.get_planning_retry_delay_sec()
+
+        for attempt in range(1, max_attempts + 1):
+            self.get_logger().info(
+                f"{description}: planning attempt {attempt}/{max_attempts}"
+            )
+
+            success, retry_allowed = self.execute_motion_once(motion_function)
+
+            if success:
+                self.get_logger().info(f"{description}: succeeded on attempt {attempt}/{max_attempts}")
+                return True
+
+            if not retry_allowed:
+                self.get_logger().warn(f"{description}: failed during execution; not retrying.")
+                return False
+
+            if attempt < max_attempts:
+                self.get_logger().warn(f"{description}: planning failed, retrying...")
+                time.sleep(retry_delay)
+
+        self.get_logger().error(f"{description}: failed after {max_attempts} planning attempts.")
+        return False
+
     def move_to_configuration(self, joint_values):
-        #change from me
         self.update_planning_speed_from_parameters()
 
-        self.get_logger().info(f"Moving to {{joint_positions: {list(joint_values)}}}")
-        self.moveit2.move_to_configuration(joint_values)
-        if self.synchronous:
-            # Note: the same functionality can be achieved by setting
-            # `synchronous:=false` and `cancel_after_secs` to a negative value.
-            self.moveit2.wait_until_executed()
-        else:
-            # Wait for the request to get accepted (i.e., for execution to start)
-            self.get_logger().info("Current State: " + str(self.moveit2.query_state()))
-            rate = self.node.create_rate(10)
-            while self.moveit2.query_state() != self.MoveIt2State.EXECUTING:
-                rate.sleep()
+        joint_values = list(joint_values)
 
-            # Get the future
-            self.get_logger().info("Current State: " + str(self.moveit2.query_state()))
-            future = self.moveit2.get_execution_future()
+        self.get_logger().info(f"Moving to {{joint_positions: {joint_values}}}")
 
-            # Cancel the goal
-            if self.cancel_after_secs > 0.0:
-                # Sleep for the specified time
-                sleep_time = self.node.create_rate(self.cancel_after_secs)
-                sleep_time.sleep()
-                # Cancel the goal
-                self.get_logger().info("Cancelling goal")
-                self.moveit2.cancel_execution()
+        def motion_function():
+            self.moveit2.move_to_configuration(joint_values)
 
-            # Wait until the future is done
-            while not future.done():
-                rate.sleep()
-
-            # Print the result
-            self.get_logger().info("Result status: " + str(future.result().status))
-            self.get_logger().info("Result error code: " + str(future.result().result.error_code))
-
-    def move_to_pose(self, position, quat_xyzw, cartesian=True, cartesian_max_step=0.0025, cartesian_fraction_threshold=0.0):
-        #change from me
-        self.update_planning_speed_from_parameters()
-
-        self.get_logger().info(f"Moving to {{position: {list(position)}, quat_xyzw: {list(quat_xyzw)}}}")
-        self.moveit2.move_to_pose(
-            position=position,
-            quat_xyzw=quat_xyzw,
-            cartesian=cartesian,
-            cartesian_max_step=cartesian_max_step,
-            cartesian_fraction_threshold=cartesian_fraction_threshold,
+        return self.execute_with_planning_retries(
+            description="move_to_configuration",
+            motion_function=motion_function,
         )
-        if self.synchronous:
-            # Note: the same functionality can be achieved by setting
-            # `synchronous:=false` and `cancel_after_secs` to a negative value.
-            self.moveit2.wait_until_executed()
-        else:
-            # Wait for the request to get accepted (i.e., for execution to start)
-            self.get_logger().info("Current State: " + str(self.moveit2.query_state()))
-            rate = self.node.create_rate(10)
-            while self.moveit2.query_state() != self.MoveIt2State.EXECUTING:
-                rate.sleep()
 
-            # Get the future
-            self.get_logger().info("Current State: " + str(self.moveit2.query_state()))
-            future = self.moveit2.get_execution_future()
+    def move_to_pose(
+        self,
+        position,
+        quat_xyzw,
+        cartesian=True,
+        cartesian_max_step=0.0025,
+        cartesian_fraction_threshold=0.0,
+    ):
+        self.update_planning_speed_from_parameters()
 
-            # Cancel the goal
-            if self.cancel_after_secs > 0.0:
-                # Sleep for the specified time
-                sleep_time = self.node.create_rate(self.cancel_after_secs)
-                sleep_time.sleep()
-                # Cancel the goal
-                self.get_logger().info("Cancelling goal")
-                self.moveit2.cancel_execution()
+        position = list(position)
+        quat_xyzw = list(quat_xyzw)
 
-            # Wait until the future is done
-            while not future.done():
-                rate.sleep()
+        self.get_logger().info(
+            f"Moving to {{position: {position}, quat_xyzw: {quat_xyzw}}}"
+        )
 
-            # Print the result
-            self.get_logger().info("Result status: " + str(future.result().status))
-            self.get_logger().info("Result error code: " + str(future.result().result.error_code))
+        def motion_function():
+            self.moveit2.move_to_pose(
+                position=position,
+                quat_xyzw=quat_xyzw,
+                cartesian=cartesian,
+                cartesian_max_step=cartesian_max_step,
+                cartesian_fraction_threshold=cartesian_fraction_threshold,
+            )
+
+        return self.execute_with_planning_retries(
+            description="move_to_pose",
+            motion_function=motion_function,
+        )
     
     def compute_fk(self, joint_values):
         self.get_logger().info(f"Computing FK for {{joint_positions: {list(joint_values)}}}")

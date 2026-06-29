@@ -1,8 +1,8 @@
 # C5 P24 Eindopdracht
 
-Deze repository bevat het ROS2-systeem voor de C5 P24 eindopdracht. Het project combineert objectdetectie, 3D-positiebepaling, robotaansturing en een gebruikersinterface tot één geïntegreerd systeem.
+Deze repository bevat het ROS2-systeem voor de C5 P24 eindopdracht. Het project combineert objectdetectie, positiebepaling, robotaansturing, sorteercycluslogica en een gebruikersinterface tot één geïntegreerd systeem.
 
-Het systeem gebruikt een Luxonis OAK-D camera voor vision, een YOLO-model voor objectdetectie, ArUco-markerreferentie voor world/robot-calibratie en een UFactory xArm Lite6 manipulator voor het oppakken van objecten.
+Het systeem gebruikt een Luxonis OAK-D camera voor vision, een YOLO-model voor objectdetectie, klassieke beeldverwerking voor het bepalen van een stabiel pickpunt, een ArUco-marker als world/robot-referentie en een UFactory xArm Lite6 manipulator voor het oppakken en sorteren van objecten.
 
 Repository:
 
@@ -34,23 +34,28 @@ https://github.com/Nibb2020/c5_p24_eindopdracht
 * [Controlecommando's](#controlecommandos)
 * [Veelvoorkomende fouten en oplossingen](#veelvoorkomende-fouten-en-oplossingen)
 * [Bekende beperkingen](#bekende-beperkingen)
+* [Aanbevolen normale workflow](#aanbevolen-normale-workflow)
+* [Projectstatus](#projectstatus)
 
 ---
 
 ## Projectdoel
 
-Het doel van dit project is om een robotarm autonoom objecten te laten herkennen, lokaliseren en oppakken.
+Het doel van dit project is om een robotarm autonoom objecten te laten herkennen, lokaliseren, oppakken en sorteren.
 
 De globale werking is:
 
-1. De OAK-D camera maakt RGB- en depthbeelden.
+1. De OAK-D camera maakt RGB-beelden en optioneel depthbeelden.
 2. Het vision-systeem detecteert objecten met een YOLO-model.
-3. De 3D-positie van het object wordt bepaald met depthdata.
-4. Een vaste ArUco-marker wordt gebruikt als referentie tussen camera-frame en robot/world-frame.
-5. De objectpositie en yaw worden gepubliceerd via ROS2-interfaces.
-6. De controller/state machine vraagt objectdata op.
-7. De manipulator gebruikt deze data om de xArm Lite6 naar het object te bewegen.
-8. De HMI toont/bedient de systeemstatus.
+3. De boundingbox van YOLO wordt gebruikt als zoekgebied voor klassieke vision.
+4. Klassieke beeldverwerking bepaalt het optische zwaartepunt, de langste objectas en het uiteindelijke pickpunt.
+5. De X/Y-positie wordt berekend vanuit het gekozen beeldpunt en een vaste of gemeten projectiediepte.
+6. De Z-positie wordt per objectklasse vast ingesteld.
+7. Een vaste ArUco-marker wordt gebruikt als referentie tussen camera-frame en robot/world-frame.
+8. De objectpositie en yaw worden gepubliceerd via ROS2-interfaces.
+9. De controller/state machine vraagt objectdata op.
+10. De manipulator gebruikt deze data om de xArm Lite6 naar het object te bewegen.
+11. De HMI toont de systeemstatus, bedient het systeem en telt succesvol gesorteerde objecten.
 
 ---
 
@@ -84,6 +89,8 @@ manipulatie/manipulator
 xArm Lite6
 ```
 
+De tellerlogica in de UI gebruikt niet langer het verdwijnen van objecten uit het camerabeeld. De UI telt een object pas als de manipulator expliciet `Klaar` meldt na een succesvolle sorteercyclus.
+
 ---
 
 ## Repositorystructuur
@@ -105,16 +112,16 @@ c5_p24_eindopdracht/
 
 Belangrijkste mappen:
 
-| Map                  | Functie                                                                            |
-| -------------------- | ---------------------------------------------------------------------------------- |
-| `controller`         | Supervisor, state machine en centrale systeemlogica                                |
-| `vision`             | OAK-D camera, YOLO-detectie, depthverwerking, ArUco-calibratie en objectpublicatie |
-| `manipulatie`        | Manipulatorlogica voor de xArm Lite6                                               |
-| `user_interface`     | HMI/bedieningsinterface                                                            |
-| `project_interfaces` | Custom ROS2 messages en services                                                   |
-| `my_ufactory_ROS2`   | UFactory/xArm-gerelateerde ROS2-integratie                                         |
-| `pymoveit2`          | MoveIt2 Python-aansturing                                                          |
-| `my_moveit_python`   | MoveIt-gerelateerde hulppakketten                                                  |
+| Map                  | Functie                                                                                       |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `controller`         | Supervisor, state machine en centrale systeemlogica                                           |
+| `vision`             | OAK-D camera, YOLO-detectie, klassieke pickpuntbepaling, ArUco-calibratie en objectpublicatie |
+| `manipulatie`        | Manipulatorlogica voor de xArm Lite6                                                          |
+| `user_interface`     | HMI/bedieningsinterface en sorteertellers                                                     |
+| `project_interfaces` | Custom ROS2 messages en services                                                              |
+| `my_ufactory_ROS2`   | UFactory/xArm-gerelateerde ROS2-integratie                                                    |
+| `pymoveit2`          | MoveIt2 Python-aansturing                                                                     |
+| `my_moveit_python`   | MoveIt-helperlogica, inclusief planning-retries en bewegingen naar pose/jointconfiguratie     |
 
 ---
 
@@ -126,6 +133,7 @@ Gebruikte hardware:
 | ----------------------- | ----------------------------------- |
 | Luxonis OAK-D camera    | RGB, stereo depth en objectdetectie |
 | UFactory xArm Lite6     | Robotmanipulator                    |
+| Vacuumgripper           | Oppakken van objecten               |
 | ArUco-marker            | World/robot-referentie voor vision  |
 | Ubuntu ROS2-machine/VM  | Draait ROS2 Jazzy                   |
 | Windows-host met VMware | Ontwikkelomgeving voor Ubuntu VM    |
@@ -195,9 +203,12 @@ Bevat de vision-node. Deze node:
 * maakt verbinding met de OAK-D;
 * start een DepthAI pipeline;
 * gebruikt YOLO voor objectdetectie;
-* gebruikt stereo depth voor 3D-positie;
+* gebruikt klassieke vision voor het pickpunt;
+* gebruikt optioneel depth voor projectiediepte;
+* gebruikt vaste Z-waarden per objectklasse;
 * gebruikt ArUco voor world/robot-calibratie;
 * publiceert objectdata naar ROS2;
+* publiceert een gemarkeerd debugbeeld;
 * biedt een service aan voor objectaanvragen.
 
 ---
@@ -219,20 +230,46 @@ De controller start de systeemlogica en kan ook de robot/manipulatorlaunch start
 
 Bevat de manipulatornode die de xArm Lite6 aanstuurt via MoveIt2/xArm-integratie.
 
+De manipulator:
+
+* ontvangt objectklasse, positie en yaw vanuit de controller;
+* beweegt eerst naar een veilige positie boven het object;
+* beweegt daarna naar de pickpositie;
+* schakelt de vacuumgripper;
+* beweegt naar de juiste dropstaat;
+* publiceert alleen `Klaar` als de volledige sorteercyclus succesvol is;
+* publiceert een foutstatus als een beweging of planning mislukt.
+
+---
+
+### `my_moveit_python`
+
+Bevat de MoveIt-helperklasse.
+
+Belangrijke functies:
+
+* `move_to_pose()`
+* `move_to_configuration()`
+* `compute_fk()`
+* `compute_ik()`
+
+De huidige versie ondersteunt planning-retries. Bij planning failure kan MoveIt maximaal 10 pogingen doen voordat de beweging als mislukt wordt beschouwd.
+
 ---
 
 ### `user_interface`
 
 Bevat de HMI-node.
 
-De HMI kan proberen een lokale camera via `/dev/video0` te openen. Als er geen gewone webcam gekoppeld is, kan deze warning verschijnen:
+De HMI:
 
-```text
-can't open camera by index
-Camera index out of range
-```
-
-Dit is niet hetzelfde als de OAK-D-camera via DepthAI.
+* publiceert start/stop naar de controller;
+* toont robotstatus, waarschuwingen en errors;
+* toont het gemarkeerde visionbeeld;
+* stelt robotparameters in, zoals velocity scaling en acceleration scaling;
+* stelt vision confidence in;
+* biedt reset, retry en home-functionaliteit;
+* telt gesorteerde objecten pas na een succesvolle manipulatorstatus `Klaar`.
 
 ---
 
@@ -273,7 +310,9 @@ Globale structuur:
 project_interfaces/ObjectData[] objects
 ```
 
-Wordt gebruikt om meerdere objecten richting UI te publiceren.
+Wordt gebruikt om objectdata richting UI te publiceren.
+
+In de huidige systeemversie publiceert vision bij een objectrequest meestal het definitieve object dat naar de manipulator gaat. De UI gebruikt dit bericht om de klasse van het actieve sorteerobject tijdelijk op te slaan.
 
 ---
 
@@ -298,29 +337,97 @@ ros2 service call /vision/voorwerp_data project_interfaces/srv/GetObjectData "{c
 
 ---
 
+### `Manipulator.srv`
+
+Wordt gebruikt om de manipulator te starten met een gedetecteerd object.
+
+Globale structuur kan projectafhankelijk zijn, maar bevat in ieder geval:
+
+```text
+klasse
+translation
+rotation
+---
+succes
+```
+
+---
+
 ## Vision-systeem
 
 De vision-node voert de volgende stappen uit:
 
 1. Verbinden met de OAK-D camera.
 2. Aanmaken van de DepthAI pipeline.
-3. Ophalen van RGB- en depthframes.
+3. Ophalen van RGB-, depth- en YOLO-packets.
 4. Objectdetectie met YOLO.
-5. Bepalen van objectpositie met depth-ROI.
-6. Bepalen van objectyaw met beeldverwerking/PCA.
-7. Detecteren van een vaste ArUco-marker.
-8. Transformeren van camera-frame naar robot/world-frame.
-9. Publiceren van objectdata en gemarkeerd debugbeeld.
-10. Beantwoorden van objectaanvragen via een ROS2-service.
+5. Bepalen van een cropgebied op basis van de YOLO-boundingbox.
+6. Segmenteren van het object binnen de crop met klassieke vision.
+7. Bepalen van het optische zwaartepunt.
+8. Bepalen van de langste objectas met PCA.
+9. Optioneel verschuiven van het pickpunt over de langste objectas richting de dikkere objectzijde.
+10. Projecteren van het gekozen beeldpunt naar camera-X/Y.
+11. Gebruiken van een vaste Z-waarde per objectklasse.
+12. Detecteren van een vaste ArUco-marker.
+13. Transformeren van camera-frame naar robot/world-frame.
+14. Publiceren van objectdata en gemarkeerd debugbeeld.
+15. Beantwoorden van objectaanvragen via een ROS2-service.
 
 Belangrijke topics/services:
 
 | Naam                         | Type    | Functie                           |
 | ---------------------------- | ------- | --------------------------------- |
 | `/vision/voorwerp_data`      | Service | Objectdata opvragen               |
-| `/vision/object_data_ui`     | Topic   | Objectarray richting UI           |
+| `/vision/object_data_ui`     | Topic   | Objectdata richting UI            |
 | `/vision/object_data_result` | Topic   | Beste object richting Lite6/debug |
 | `/vision/marked_foto`        | Topic   | Gemarkeerd debugbeeld             |
+
+---
+
+## Klassieke pickpuntbepaling
+
+De pickpuntbepaling werkt als volgt:
+
+```text
+YOLO-boundingbox
+    ↓
+crop met marge
+    ↓
+GrabCut / voorgrondmasker
+    ↓
+grootste objectcomponent
+    ↓
+optisch zwaartepunt
+    ↓
+PCA-langste as
+    ↓
+optionele verschuiving over de langste as
+    ↓
+pick_center_x / pick_center_y
+```
+
+In het gemarkeerde beeld:
+
+| Markering   | Betekenis                                             |
+| ----------- | ----------------------------------------------------- |
+| Paarse stip | Optisch zwaartepunt van het objectmasker              |
+| Rode stip   | Uiteindelijke pickpositie                             |
+| Rode lijn   | Verschuiving van optisch zwaartepunt naar pickpositie |
+| Blauwe as   | Langste objectas                                      |
+| Gele as     | Gripperas / haakse as                                 |
+
+De verschuiving per klasse staat in `vision/config/config.py`:
+
+```python
+PICK_CENTER_SHIFT_PX = {
+    0: 0.0,   # schip
+    1: 0.0,   # dino
+    2: 0.0,   # olifant
+    3: 0.0,   # smiley
+}
+```
+
+Positieve waarden verschuiven het pickpunt in de berekende positieve objectrichting. Negatieve waarden verschuiven in de tegenovergestelde richting.
 
 ---
 
@@ -339,15 +446,61 @@ De robotlaunch start onder andere:
 * statische transforms
 * manipulatornode
 
-Als de robot niet bereikbaar is, zijn deze fouten verwacht:
+De manipulator voert een sorteeractie uit in deze volgorde:
 
 ```text
-Error: Tcp control connection failed
-Segmentation fault
-Could not contact service /controller_manager/list_controllers
+1. Naar positie boven object
+2. Naar objectpositie
+3. Vacuumgripper sluiten
+4. Terug omhoog
+5. Naar dropstaat op basis van objectklasse
+6. Vacuumgripper openen
+7. Naar up/home-positie
+8. Status "Klaar" publiceren
 ```
 
-Dit betekent niet automatisch dat de ROS2-packages fout zijn. Het betekent meestal dat de Lite6 niet bereikbaar is op het ingestelde IP-adres.
+Bij een fout publiceert de manipulator geen `Klaar`, maar een foutstatus zoals:
+
+```text
+Fout: manipulator sequence mislukt
+```
+
+Dit is belangrijk voor de UI-teller.
+
+---
+
+## MoveIt-planning en retries
+
+De MoveIt-helper kan bewegingen meerdere keren proberen te plannen.
+
+Belangrijke parameters:
+
+```text
+max_planning_attempts
+planning_retry_delay_sec
+velocity_scaling
+acceleration_scaling
+```
+
+Standaard:
+
+```text
+max_planning_attempts = 10
+planning_retry_delay_sec = 0.2
+velocity_scaling = 0.1
+acceleration_scaling = 0.1
+```
+
+De retrylogica helpt vooral bij stochastische OMPL-planning. Bij echte structurele collisions, bijvoorbeeld tussen gripper/object en een obstacle, blijven meerdere pogingen waarschijnlijk falen.
+
+Voorbeelden van structurele collisionmeldingen:
+
+```text
+Found a contact between 'held_object_link' and 'Tussenwand_Link'
+Found a contact between 'gripper_lite6_link' and 'CamStatief_Link'
+```
+
+In zulke gevallen moeten de SRDF-states, collisionobjecten, tussenposities of drop-posities worden aangepast.
 
 ---
 
@@ -365,14 +518,46 @@ De HMI publiceert onder andere naar:
 /ui/start_stop
 ```
 
-Als er geen lokale webcam beschikbaar is, kunnen deze warnings verschijnen:
+De HMI abonneert zich onder andere op:
 
 ```text
-VIDEOIO(V4L2:/dev/video0): can't open camera by index
-Camera index out of range
+/controller/state
+/controller/warning
+/controller/error
+/vision/object_data_ui
+/vision/marked_foto
+/manipulator/status
 ```
 
-Deze warnings zijn niet kritisch als de HMI geen gewone webcam nodig heeft.
+De sorteerteller werkt als volgt:
+
+```text
+vision publiceert objectdata
+    ↓
+UI onthoudt objectklasse als pending sorteerobject
+    ↓
+manipulator voert sorteercyclus uit
+    ↓
+manipulator/status == "Klaar"
+    ↓
+UI telt object +1
+```
+
+Bij manipulatorfouten telt de UI niets.
+
+Voorbeelden:
+
+```text
+Klaar
+```
+
+betekent: object succesvol gesorteerd, teller +1.
+
+```text
+Fout: manipulator sequence mislukt
+```
+
+betekent: object niet tellen.
 
 ---
 
@@ -559,26 +744,56 @@ vision/config/config.py
 
 Belangrijke instellingen:
 
-| Configwaarde                | Functie                                        |
-| --------------------------- | ---------------------------------------------- |
-| `DEBUG_PUBLISH_CONTINUOUS`  | Continu gemarkeerd beeld publiceren            |
-| `DEBUG_DRAW_ARUCO_LIVE`     | ArUco-overlay tekenen in debugbeeld            |
-| `RGB_WIDTH` / `RGB_HEIGHT`  | Resolutie voor RGB/NN-frame                    |
-| `USB_SPEED`                 | USB-snelheid voor OAK-D                        |
-| `USE_DEVICE_CALIBRATION`    | OAK-D EEPROM-calibratie gebruiken              |
-| `SERVICE_NAME`              | Naam van vision-service                        |
-| `UI_TOPIC`                  | Topic richting UI                              |
-| `MARKED_IMAGE_TOPIC`        | Gemarkeerd beeldtopic                          |
-| `LITE6_RESULT_TOPIC`        | Objectdata richting manipulator/debug          |
-| `OBJECT_SAMPLE_COUNT`       | Aantal samples per stabiele objectmeting       |
-| `OBJECT_SAMPLE_TIMEOUT_SEC` | Maximale meettijd                              |
-| `MODEL_VERSION`             | Actieve modelversie                            |
-| `ARUCO_MARKER_ID`           | ID van vaste ArUco-marker                      |
-| `ARUCO_SIZE_M`              | Fysieke markermaat in meters                   |
-| `ARUCO_WORLD_X/Y/Z`         | Markerpositie in robot/world-frame             |
-| `ARUCO_TO_ROBOT_ROTATION`   | Rotatiematrix van ArUco-frame naar robot-frame |
-| `ROBOT_FILTER_ENABLED`      | Objectfiltering voor robotbereik               |
-| `ROBOT_MIN_X_M` etc.        | Robotbereikgrenzen                             |
+| Configwaarde                 | Functie                                        |
+| ---------------------------- | ---------------------------------------------- |
+| `DEBUG_PUBLISH_CONTINUOUS`   | Continu gemarkeerd beeld publiceren            |
+| `DEBUG_DRAW_ARUCO_LIVE`      | ArUco-overlay tekenen in debugbeeld            |
+| `RGB_WIDTH` / `RGB_HEIGHT`   | Resolutie voor RGB/NN-frame                    |
+| `USB_SPEED`                  | USB-snelheid voor OAK-D                        |
+| `USE_DEVICE_CALIBRATION`     | OAK-D EEPROM-calibratie gebruiken              |
+| `SERVICE_NAME`               | Naam van vision-service                        |
+| `UI_TOPIC`                   | Topic richting UI                              |
+| `MARKED_IMAGE_TOPIC`         | Gemarkeerd beeldtopic                          |
+| `LITE6_RESULT_TOPIC`         | Objectdata richting manipulator/debug          |
+| `OBJECT_SAMPLE_COUNT`        | Aantal samples per stabiele objectmeting       |
+| `OBJECT_SAMPLE_TIMEOUT_SEC`  | Maximale meettijd                              |
+| `MODEL_VERSION`              | Actieve modelversie                            |
+| `USE_CLASSICAL_PICK_CENTER`  | Klassieke vision gebruiken voor pickpunt       |
+| `USE_FIXED_PROJECTION_DEPTH` | Vaste projectiediepte gebruiken voor X/Y       |
+| `FIXED_PROJECTION_DEPTH_M`   | Camera-projectiediepte in meters               |
+| `USE_FIXED_OBJECT_Z`         | Vaste Z per objectklasse gebruiken             |
+| `FIXED_OBJECT_Z_M`           | Z-waarde per objectklasse                      |
+| `PICK_CENTER_SHIFT_PX`       | Pickpuntverschuiving per klasse in pixels      |
+| `ARUCO_MARKER_ID`            | ID van vaste ArUco-marker                      |
+| `ARUCO_SIZE_M`               | Fysieke markermaat in meters                   |
+| `ARUCO_WORLD_X/Y/Z`          | Markerpositie in robot/world-frame             |
+| `ARUCO_TO_ROBOT_ROTATION`    | Rotatiematrix van ArUco-frame naar robot-frame |
+| `ROBOT_FILTER_ENABLED`       | Objectfiltering voor robotbereik               |
+| `ROBOT_MIN_X_M` etc.         | Robotbereikgrenzen                             |
+
+Voorbeeld van relevante visionconfiguratie:
+
+```python
+USE_FIXED_OBJECT_Z = True
+USE_CLASSICAL_PICK_CENTER = True
+USE_FIXED_PROJECTION_DEPTH = True
+
+FIXED_PROJECTION_DEPTH_M = 0.720
+
+FIXED_OBJECT_Z_M = {
+    0: 0.113,
+    1: 0.102,
+    2: 0.092,
+    3: 0.0835,
+}
+
+PICK_CENTER_SHIFT_PX = {
+    0: 0.0,
+    1: 0.0,
+    2: 0.0,
+    3: 0.0,
+}
+```
 
 ---
 
@@ -657,6 +872,12 @@ Visiontopics filteren:
 
 ```bash
 ros2 topic list | grep vision
+```
+
+Manipulatorstatus bekijken:
+
+```bash
+ros2 topic echo /manipulator/status
 ```
 
 ### Services bekijken
@@ -839,7 +1060,27 @@ Als de camera bewust niet beschikbaar is, is deze melding normaal. De vision-nod
 
 ---
 
-### 7. HMI: `/dev/video0` niet beschikbaar
+### 7. OAK-D: `Stereo alignment error`
+
+Melding:
+
+```text
+[StereoDepth] [error] Stereo alignment error: 1, trying to recover.
+```
+
+Oorzaak:
+
+De stereo-depth pipeline heeft tijdelijk problemen met alignment of synchronisatie.
+
+Oplossing:
+
+* Controleer USB-koppeling met de VM.
+* Controleer of de OAK-D stabiel verbonden blijft.
+* Gebruik voor X/Y-bepaling bij voorkeur `USE_FIXED_PROJECTION_DEPTH = True`, zodat instabiele depth minder invloed heeft op de pickpositie.
+
+---
+
+### 8. HMI: `/dev/video0` niet beschikbaar
 
 Melding:
 
@@ -856,7 +1097,7 @@ Als de HMI geen lokale webcam nodig heeft, kan deze melding genegeerd worden.
 
 ---
 
-### 8. xArm: `Tcp control connection failed`
+### 9. xArm: `Tcp control connection failed`
 
 Melding:
 
@@ -884,7 +1125,62 @@ Could not contact service /controller_manager/list_controllers
 
 ---
 
-### 9. `AMENT_PREFIX_PATH` warning over oude package
+### 10. MoveIt: `INVALID_MOTION_PLAN`
+
+Melding:
+
+```text
+PlanningResponseAdapter 'ValidateSolution' failed with error code INVALID_MOTION_PLAN
+Generating a plan with planning pipeline failed.
+```
+
+Oorzaak:
+
+MoveIt heeft een pad gevonden dat achteraf ongeldig blijkt, vaak door collision of joint/trajectory-validatie.
+
+Bijvoorbeeld:
+
+```text
+Found a contact between 'held_object_link' and 'Tussenwand_Link'
+Found a contact between 'gripper_lite6_link' and 'CamStatief_Link'
+```
+
+Oplossingen:
+
+* Laat MoveIt meerdere planningpogingen doen.
+* Verplaats dropstates verder van obstakels.
+* Voeg een veilige tussenpositie toe.
+* Controleer collisionobjecten.
+* Maak collisionmodellen van object/gripper realistischer.
+* Verhoog de drop- of tussenpositie.
+
+---
+
+### 11. UI-teller telt verkeerd
+
+Oude oorzaak:
+
+De UI telde objecten die uit de visionlijst verdwenen. Dat is onbetrouwbaar, omdat objecten ook kunnen verdwijnen door beweging, confidence, filtering of camerabeeld.
+
+Nieuwe werking:
+
+```text
+visionbericht → pending objectklasse opslaan
+manipulator/status = Klaar → teller +1
+manipulator/status = Fout... → niet tellen
+```
+
+Controle:
+
+```bash
+ros2 topic echo /manipulator/status
+```
+
+De UI telt alleen bij exact succesvolle sortering.
+
+---
+
+### 12. `AMENT_PREFIX_PATH` warning over oude package
 
 Voorbeeld:
 
@@ -930,6 +1226,10 @@ source install/setup.bash
 * Zonder `/dev/video0` kan de HMI webcamwarnings geven.
 * `rotation.z` in `ObjectData` wordt project-specifiek gebruikt als yaw in radialen, niet als standaard quaternioncomponent.
 * Het `.blob` model moet aanwezig zijn in de ingestelde modelversiemap onder `vision/models/<MODEL_VERSION>/`.
+* DepthAI-depth is niet betrouwbaar genoeg als enige basis voor het pickpunt; daarom gebruikt het systeem klassieke vision voor het X/Y-pickpunt.
+* Vaste Z-waarden per objectklasse moeten handmatig worden getuned voor de gebruikte objecten.
+* MoveIt-retries lossen geen structurele collisionproblemen op.
+* De UI-teller is afhankelijk van correcte manipulatorstatussen. De manipulator mag alleen `Klaar` publiceren als de volledige sorteeractie echt is gelukt.
 
 ---
 
@@ -958,11 +1258,39 @@ source install/setup.bash
 ros2 launch controller full_system.launch.py
 ```
 
+Bij twijfel of oude builds de oorzaak zijn:
+
+```bash
+cd ~/c5_p24_eindproject_ws
+rm -rf build install log
+
+source /opt/ros/jazzy/setup.bash
+source .venv/bin/activate
+
+python3 -m colcon build --packages-select project_interfaces vision controller user_interface manipulatie --symlink-install --allow-overriding project_interfaces
+
+source install/setup.bash
+ros2 launch controller full_system.launch.py
+```
+
 ---
 
 ## Projectstatus
 
 Het geïntegreerde ROS2-systeem kan softwarematig starten vanuit de vision `.venv`. De correcte werking van de volledige keten vereist dat zowel de OAK-D camera als de xArm Lite6 robot beschikbaar zijn.
+
+De huidige systeemversie bevat:
+
+* YOLO-objectdetectie op de OAK-D;
+* klassieke vision voor pickpuntbepaling;
+* optisch zwaartepunt en PCA-objectas;
+* vaste Z-waarden per objectklasse;
+* optionele vaste projectiediepte voor stabielere X/Y-projectie;
+* ArUco-gebaseerde camera-naar-robottransformatie;
+* MoveIt-aansturing van de xArm Lite6;
+* planning-retries bij MoveIt-planning failures;
+* manipulatorstatussen die onderscheid maken tussen succes en fout;
+* UI-tellers die alleen optellen na een succesvolle manipulatorstatus `Klaar`.
 
 Wanneer camera en robot niet beschikbaar zijn, zijn de volgende meldingen verwacht:
 
@@ -973,3 +1301,4 @@ Could not contact service /controller_manager/list_controllers
 ```
 
 Deze meldingen betekenen in dat geval niet dat de build of launchfile fout is.
+
