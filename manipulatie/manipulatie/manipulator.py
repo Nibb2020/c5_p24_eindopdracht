@@ -249,9 +249,6 @@ class manipulatorController(Node):
 
         return True
 
-    
-
-
 #move home functies
     def move_home_callback(self, request, response):
         self.get_logger().info("Move home service ontvangen")

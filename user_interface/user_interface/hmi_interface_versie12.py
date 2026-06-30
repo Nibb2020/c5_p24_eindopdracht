@@ -54,12 +54,7 @@ class HumanInterface(Node):
 
         self.ui_teller_labels = {}
 
-        # Previous ObjectDataArray converted to class and position.
         self.vorige_vision_objecten = None
-        self.pending_sort_object_class = None
-        self.pending_sort_object_id = None
-        self.pending_sort_active = False
-        self.pending_sort_already_counted = False
 
         # Teller telt niet meer op verdwenen vision-objecten.
         # De teller telt pas wanneer de manipulator "Klaar" meldt.
